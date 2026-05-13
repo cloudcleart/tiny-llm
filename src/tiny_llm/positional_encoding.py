@@ -9,9 +9,63 @@ class RoPE:
         base: int = 10000,
         traditional: bool = False,
     ):
-        pass
+        """
+        Args:
+            dims: Head dimension size. Must be even because RoPE rotates pairs.
+            seq_len: Maximum sequence length to precompute frequencies for.
+            base: Frequency base used by RoPE, usually 10000 or the model's theta.
+            traditional: Whether to use adjacent-dimension pairing for rotation.
+        """
+        assert dims % 2 == 0, "dims must be even"
+        self.dims = dims
+        self.seq_len = seq_len
+        self.base = base
+        self.traditional = traditional
+        self.half_dims = dims // 2
+
+        # Precompute one RoPE angle per position and per dimension pair.
+        inner = mx.arange(self.half_dims, dtype=mx.float32) / self.half_dims
+        freqs = mx.power(base, -inner)
+        positions = mx.arange(seq_len)
+        freqs = mx.outer(positions, freqs)
+        self.cos_freqs = mx.cos(freqs)
+        self.sin_freqs = mx.sin(freqs)
 
     def __call__(
         self, x: mx.array, offset: list[slice] | slice | None = None
     ) -> mx.array:
-        pass
+        """
+        Args:
+            x: Input tensor with shape (batch, seq_len, num_heads, head_dim).
+            offset: Absolute position range for x. None means positions start at 0.
+
+        Returns:
+            x with RoPE applied, preserving the original shape and dtype.
+        """
+        N, S, H, D = x.shape
+        orig_dtype = x.dtype
+
+        if offset is None:
+            cos_freqs = self.cos_freqs[:S]
+            sin_freqs = self.sin_freqs[:S]
+        else:
+            # During generation, the input may start at a later absolute position.
+            assert isinstance(offset, slice), "offset must be None or a slice"
+            assert offset.stop - offset.start == S, f"offset must be of length {S}"
+            cos_freqs = self.cos_freqs[offset]
+            sin_freqs = self.sin_freqs[offset]
+
+        # Broadcast position frequencies over the batch and attention heads.
+        cos_freqs = cos_freqs.reshape(1, S, 1, self.half_dims)
+        sin_freqs = sin_freqs.reshape(1, S, 1, self.half_dims)
+
+        assert self.traditional, "non-traditional RoPE is implemented in task 2"
+        # Traditional RoPE treats adjacent values as complex pairs: (0, 1), (2, 3), ...
+        x = x.reshape(N, S, H, self.half_dims, 2)
+        x1 = x[..., 0]
+        x2 = x[..., 1]
+
+        # Complex multiplication by cos(theta) + i sin(theta).
+        real = x1 * cos_freqs - x2 * sin_freqs
+        imag = x1 * sin_freqs + x2 * cos_freqs
+        return mx.stack([real, imag], axis=-1).reshape(N, S, H, D).astype(orig_dtype)
