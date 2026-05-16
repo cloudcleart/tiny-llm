@@ -130,7 +130,10 @@ class SimpleMultiHeadAttention:
 
 
 def causal_mask(L: int, S: int, dtype: mx.Dtype) -> mx.array:
-    pass
+    # When S > L, the extra key/value positions are already-existing context.
+    # Shift the causal diagonal right so queries can attend to that history.
+    mask = mx.tril(mx.ones((L, S)), k=S - L)
+    return mx.where(mask, mx.array(0), mx.array(-mx.inf)).astype(dtype)
 
 
 def scaled_dot_product_attention_grouped(
@@ -140,7 +143,57 @@ def scaled_dot_product_attention_grouped(
     scale: float | None = None,
     mask: mx.array | str | None = None,
 ) -> mx.array:
-    pass
+    """
+    Args:
+        query: Query vectors with shape (..., H_q, L, D).
+        key: Key vectors with shape (..., H, S, D).
+        value: Value vectors with shape (..., H, S, D).
+        scale: Optional multiplier for attention scores. Defaults to 1 / sqrt(D).
+        mask: Optional additive mask with shape broadcastable to (..., H_q, L, S),
+            or the string "causal".
+
+    Returns:
+        Attention output with shape (..., H_q, L, D).
+    """
+    assert query.ndim >= 3
+    assert key.ndim == query.ndim
+    assert value.ndim == query.ndim
+    assert key.shape == value.shape
+
+    # Treat every leading dimension as batch; Task 1 tests 0, 1, and 2 batch dims.
+    batch_shape = query.shape[:-3]
+    H_q, L, D = query.shape[-3:]
+    H, S, D_k = key.shape[-3:]
+
+    assert key.shape[:-3] == batch_shape
+    assert D == D_k
+    assert H_q % H == 0
+
+    # Split query heads into KV groups. Each KV head serves n_repeats query heads.
+    n_repeats = H_q // H
+    expected_shape = query.shape
+    factor = mx.rsqrt(D) if scale is None else mx.array(scale)
+    factor = factor.astype(query.dtype)
+
+    # Insert the group dimension explicitly; K/V use size 1 so matmul broadcasts
+    # the shared KV head across all query heads in the same group.
+    query = query.reshape(*batch_shape, H, n_repeats, L, D)
+    key = key.reshape(*batch_shape, H, 1, S, D)
+    value = value.reshape(*batch_shape, H, 1, S, D)
+
+    scores = mx.matmul(query, key.swapaxes(-2, -1)) * factor
+    if mask is not None:
+        if mask == "causal":
+            scores = scores + causal_mask(L, S, scores.dtype)
+        else:
+            # Match the mask layout to grouped scores: (..., H, n_repeats, L, S).
+            mask = mx.broadcast_to(mask, (*batch_shape, H_q, L, S))
+            mask = mask.reshape(*batch_shape, H, n_repeats, L, S)
+            scores = scores + mask
+
+    # Collapse H and n_repeats back into the original H_q dimension.
+    output = mx.matmul(softmax(scores, axis=-1), value)
+    return output.reshape(expected_shape)
 
 
 def flash_attention(
