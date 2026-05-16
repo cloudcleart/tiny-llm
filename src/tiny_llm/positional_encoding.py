@@ -15,6 +15,8 @@ class RoPE:
             seq_len: Maximum sequence length to precompute frequencies for.
             base: Frequency base used by RoPE, usually 10000 or the model's theta.
             traditional: Whether to use adjacent-dimension pairing for rotation.
+                If false, pair the first half of the head dimension with the
+                second half, matching Qwen2-style RoPE.
         """
         assert dims % 2 == 0, "dims must be even"
         self.dims = dims
@@ -42,30 +44,38 @@ class RoPE:
         Returns:
             x with RoPE applied, preserving the original shape and dtype.
         """
-        N, S, H, D = x.shape
+        N, L, H, D = x.shape
         orig_dtype = x.dtype
 
         if offset is None:
-            cos_freqs = self.cos_freqs[:S]
-            sin_freqs = self.sin_freqs[:S]
+            cos_freqs = self.cos_freqs[:L]
+            sin_freqs = self.sin_freqs[:L]
         else:
             # During generation, the input may start at a later absolute position.
             assert isinstance(offset, slice), "offset must be None or a slice"
-            assert offset.stop - offset.start == S, f"offset must be of length {S}"
+            assert offset.stop - offset.start == L, f"offset must be of length {L}"
             cos_freqs = self.cos_freqs[offset]
             sin_freqs = self.sin_freqs[offset]
 
         # Broadcast position frequencies over the batch and attention heads.
-        cos_freqs = cos_freqs.reshape(1, S, 1, self.half_dims)
-        sin_freqs = sin_freqs.reshape(1, S, 1, self.half_dims)
+        cos_freqs = cos_freqs.reshape(1, L, 1, self.half_dims)
+        sin_freqs = sin_freqs.reshape(1, L, 1, self.half_dims)
 
-        assert self.traditional, "non-traditional RoPE is implemented in task 2"
-        # Traditional RoPE treats adjacent values as complex pairs: (0, 1), (2, 3), ...
-        x = x.reshape(N, S, H, self.half_dims, 2)
-        x1 = x[..., 0]
-        x2 = x[..., 1]
+        if self.traditional:
+            # Traditional RoPE treats adjacent values as complex pairs: (0, 1), (2, 3), ...
+            x = x.reshape(N, L, H, self.half_dims, 2)
+            x1 = x[..., 0]
+            x2 = x[..., 1]
+        else:
+            # Qwen2-style RoPE pairs the first half with the second half.
+            x1 = x[..., : self.half_dims]
+            x2 = x[..., self.half_dims :]
 
         # Complex multiplication by cos(theta) + i sin(theta).
         real = x1 * cos_freqs - x2 * sin_freqs
         imag = x1 * sin_freqs + x2 * cos_freqs
-        return mx.stack([real, imag], axis=-1).reshape(N, S, H, D).astype(orig_dtype)
+        if self.traditional:
+            y = mx.stack([real, imag], axis=-1).reshape(N, L, H, D)
+        else:
+            y = mx.concat([real, imag], axis=-1)
+        return y.astype(orig_dtype)
