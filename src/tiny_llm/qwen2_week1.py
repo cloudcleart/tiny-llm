@@ -103,10 +103,31 @@ class Qwen2MLP:
         w_up: mx.array,
         w_down: mx.array,
     ):
-        pass
+        """
+        Args:
+            dim: Input and output hidden size E.
+            hidden_dim: Intermediate MLP size I.
+            w_gate: Gate projection weight with shape (I, E).
+            w_up: Up projection weight with shape (I, E).
+            w_down: Down projection weight with shape (E, I).
+        """
+        self.dim = dim
+        self.hidden_dim = hidden_dim
+        self.w_gate = w_gate
+        self.w_up = w_up
+        self.w_down = w_down
 
     def __call__(self, x: mx.array) -> mx.array:
-        pass
+        """
+        Args:
+            x: Input hidden states with shape (..., E).
+
+        Returns:
+            Output hidden states with shape (..., E).
+        """
+        # Qwen2 uses a gated MLP: SiLU(gate_proj(x)) gates up_proj(x).
+        gated = silu(linear(x, self.w_gate)) * linear(x, self.w_up)
+        return linear(gated, self.w_down)
 
 
 class Qwen2TransformerBlock:

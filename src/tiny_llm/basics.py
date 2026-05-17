@@ -30,4 +30,13 @@ def linear(
 
 
 def silu(x: mx.array) -> mx.array:
-    pass
+    """
+    Applies the SiLU activation function element-wise.
+
+    Args:
+        x: Input tensor of any shape.
+
+    Returns:
+        Tensor with the same shape as x, computed as x * sigmoid(x).
+    """
+    return x * mx.sigmoid(x)
