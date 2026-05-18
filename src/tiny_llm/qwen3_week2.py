@@ -1,5 +1,5 @@
 import mlx.core as mx
-from .basics import linear, silu
+from .basics import silu
 from .attention import scaled_dot_product_attention_grouped
 from .layer_norm import RMSNorm
 from .positional_encoding import RoPE
@@ -9,21 +9,22 @@ from .quantize import dequantize_linear, QuantizedWeights
 from .kv_cache import TinyKvCache
 
 
-class Qwen2MultiHeadAttention:
+class Qwen3MultiHeadAttention:
     def __init__(
         self,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        head_dim: int,
         wq: QuantizedWeights,
         wk: QuantizedWeights,
         wv: QuantizedWeights,
         wo: QuantizedWeights,
-        bq: mx.array,
-        bk: mx.array,
-        bv: mx.array,
+        q_norm: mx.array,
+        k_norm: mx.array,
         max_seq_len: int = 32768,
         theta: int = 1000000,
+        rms_norm_eps: float = 1e-5,
         use_flash_attention: bool = False,
     ):
         pass
@@ -38,7 +39,7 @@ class Qwen2MultiHeadAttention:
         pass
 
 
-class Qwen2MLP:
+class Qwen3MLP:
     def __init__(
         self,
         dim: int,
@@ -53,21 +54,21 @@ class Qwen2MLP:
         pass
 
 
-class Qwen2TransformerBlock:
+class Qwen3TransformerBlock:
     def __init__(
         self,
         num_attention_heads: int,
         num_kv_heads: int,
         hidden_size: int,
+        head_dim: int,
         intermediate_size: int,
         rms_norm_eps: float,
         wq: QuantizedWeights,
         wk: QuantizedWeights,
         wv: QuantizedWeights,
         wo: QuantizedWeights,
-        bq: mx.array,
-        bk: mx.array,
-        bv: mx.array,
+        q_norm: mx.array,
+        k_norm: mx.array,
         w_gate: QuantizedWeights,
         w_up: QuantizedWeights,
         w_down: QuantizedWeights,
@@ -89,7 +90,7 @@ class Qwen2TransformerBlock:
         pass
 
 
-class Qwen2ModelWeek2:
+class Qwen3ModelWeek2:
     def __init__(
         self,
         mlx_model: Any,
