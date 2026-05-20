@@ -11,8 +11,45 @@ def simple_generate(
     prompt: str,
     sampler: Callable[[mx.array], mx.array] | None,
 ) -> str:
+    """Generate tokens from a prompt using the Week 1 model.
+
+    Args:
+        model: Qwen3 model that accepts token ids with shape ``1 x S`` and
+            returns logits with shape ``1 x S x vocab_size``.
+        tokenizer: Tokenizer used to encode the prompt and detokenize generated
+            token ids for streaming output.
+        prompt: User input text used as the initial context.
+        sampler: Optional decoding function that maps log-probabilities with
+            shape ``1 x vocab_size`` to the next token id. When omitted, greedy
+            decoding is used.
+    """
+
     def _step(model, y):
-        pass
+        """Run one generation step: current context tokens -> next token id."""
+        # The Week 1 model has no batch generation, so add a batch dimension.
+        logits = model(y[None])
+
+        # Only the final sequence position predicts the next generated token.
+        logits = logits[:, -1, :]
+        logprobs = logits - mx.logsumexp(logits, keepdims=True)
+        if sampler is None:
+            return mx.argmax(logprobs, axis=-1)
+        return sampler(logprobs)
+
+    # Prefill: encode the whole prompt and use it as the initial context.
+    tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))
+    detokenizer = tokenizer.detokenizer
+    detokenizer.reset()
+
+    while True:
+        # Decode without KV cache: feed the full context on every step.
+        token = _step(model, tokens)
+        mx.eval(token)
+        tokens = mx.concat([tokens, token])
+        if token.item() == tokenizer.eos_token_id:
+            break
+        detokenizer.add_token(token.item())
+        print(detokenizer.last_segment, end="", flush=True)
 
 
 def simple_generate_with_kv_cache(
