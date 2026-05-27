@@ -5,7 +5,7 @@ from .layer_norm import RMSNorm
 from .positional_encoding import RoPE
 from typing import Any
 from .embedding import Embedding
-from .quantize import dequantize_linear, QuantizedWeights
+from .quantize import dequantize_linear, QuantizedWeights, quantized_linear
 from .kv_cache import TinyKvCache
 
 
@@ -34,10 +34,10 @@ class Qwen3MultiHeadAttention:
 
         self.head_dim = head_dim
         self.scale = mx.rsqrt(self.head_dim)
-        self.wq = dequantize_linear(wq)
-        self.wk = dequantize_linear(wk)
-        self.wv = dequantize_linear(wv)
-        self.wo = dequantize_linear(wo)
+        self.wq = wq
+        self.wk = wk
+        self.wv = wv
+        self.wo = wo
         self.q_norm = RMSNorm(head_dim, q_norm, eps=rms_norm_eps)
         self.k_norm = RMSNorm(head_dim, k_norm, eps=rms_norm_eps)
         self.rope = RoPE(self.head_dim, max_seq_len, theta)
@@ -65,13 +65,13 @@ class Qwen3MultiHeadAttention:
         assert cache.offset == offset
 
         # Step 1: project the new tokens into Q/K/V head states.
-        q = linear(x, self.wq).reshape(
+        q = quantized_linear(x, self.wq).reshape(
             B, L_new, self.num_heads, self.head_dim
         )
-        k = linear(x, self.wk).reshape(
+        k = quantized_linear(x, self.wk).reshape(
             B, L_new, self.num_kv_heads, self.head_dim
         )
-        v = linear(x, self.wv).reshape(
+        v = quantized_linear(x, self.wv).reshape(
             B, L_new, self.num_kv_heads, self.head_dim
         )
 
@@ -105,7 +105,7 @@ class Qwen3MultiHeadAttention:
         x = x.transpose(0, 2, 1, 3).reshape(
             B, L_new, self.num_heads * self.head_dim
         )
-        return linear(x, self.wo)
+        return quantized_linear(x, self.wo)
 
 
 class Qwen3MLP:
@@ -127,9 +127,9 @@ class Qwen3MLP:
         """
         self.dim = dim
         self.hidden_dim = hidden_dim
-        self.w_gate = dequantize_linear(w_gate)
-        self.w_up = dequantize_linear(w_up)
-        self.w_down = dequantize_linear(w_down)
+        self.w_gate = w_gate
+        self.w_up = w_up
+        self.w_down = w_down
 
     def __call__(self, x: mx.array) -> mx.array:
         """
@@ -139,8 +139,10 @@ class Qwen3MLP:
         Returns:
             Output hidden states with shape (..., E).
         """
-        gated = silu(linear(x, self.w_gate)) * linear(x, self.w_up)
-        return linear(gated, self.w_down)
+        gated = silu(quantized_linear(x, self.w_gate)) * quantized_linear(
+            x, self.w_up
+        )
+        return quantized_linear(gated, self.w_down)
 
 
 class Qwen3TransformerBlock:
