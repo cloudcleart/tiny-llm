@@ -1,6 +1,6 @@
 import mlx.core as mx
 from .basics import linear, silu
-from .attention import scaled_dot_product_attention_grouped
+from .attention import flash_attention, scaled_dot_product_attention_grouped
 from .layer_norm import RMSNorm
 from .positional_encoding import RoPE
 from typing import Any
@@ -92,8 +92,16 @@ class Qwen3MultiHeadAttention:
         k = k.transpose(0, 2, 1, 3)
         v = v.transpose(0, 2, 1, 3)
 
-        # Step 6: attend from new queries over all cached keys/values.
-        x = scaled_dot_product_attention_grouped(
+        # Step 6: attend from new queries over all cached keys/values. After
+        # cache update, S may include old tokens, so the mask must cover
+        # L_new x S. Flash attention uses the same head-first layout as the
+        # grouped fallback.
+        attention_fn = (
+            flash_attention
+            if self.use_flash_attention
+            else scaled_dot_product_attention_grouped
+        )
+        x = attention_fn(
             q.astype(mx.float32),
             k.astype(mx.float32),
             v.astype(mx.float32),

@@ -1,6 +1,15 @@
 import mlx.core as mx
 from .basics import softmax, linear
 
+try:
+    from extensions import tiny_llm_ext
+except ImportError:
+    try:
+        import tiny_llm_ext
+    except ImportError:
+        # The Python wrapper is useful before the C++/Metal extension tasks are done.
+        tiny_llm_ext = None
+
 
 def scaled_dot_product_attention_simple(
     query: mx.array,
@@ -201,6 +210,88 @@ def flash_attention(
     key: mx.array,
     value: mx.array,
     scale: float | None = None,
-    mask: mx.array | None = None,
+    mask: mx.array | str | None = None,
 ) -> mx.array:
-    pass
+    """
+    Args:
+        query: Query vectors with shape (..., H_q, L, D).
+        key: Key vectors with shape (..., H, S, D).
+        value: Value vectors with shape (..., H, S, D).
+        scale: Optional multiplier for attention scores. Defaults to 1 / sqrt(D).
+        mask: Optional additive mask with shape broadcastable to (..., H_q, L, S),
+            or the string "causal".
+
+    Returns:
+        Attention output with shape (..., H_q, L, D).
+    """
+    assert query.ndim >= 3
+    assert key.ndim == query.ndim
+    assert value.ndim == query.ndim
+    assert key.shape == value.shape
+
+    batch_shape = query.shape[:-3]
+    H_q, L, D = query.shape[-3:]
+    H, S, D_k = key.shape[-3:]
+
+    assert key.shape[:-3] == batch_shape
+    assert D == D_k
+    assert H_q % H == 0
+
+    # The extension binding takes a Python float, not an MLX scalar.
+    factor = (
+        float(mx.rsqrt(mx.array(D, dtype=mx.float32)))
+        if scale is None
+        else float(scale)
+    )
+    original_shape = query.shape
+    batch_size = 1
+    for dim in batch_shape:
+        batch_size *= dim
+
+    is_causal = isinstance(mask, str) and mask == "causal"
+    if isinstance(mask, str) and not is_causal:
+        raise ValueError(f"Unknown attention mask: {mask}")
+
+    # The extension always receives a concrete additive mask. The is_causal flag
+    # lets the CPU/GPU kernels take their block-level causal fast path.
+    if is_causal:
+        mask = causal_mask(L, S, mx.float32)
+    elif mask is None:
+        mask = mx.zeros((*batch_shape, H_q, L, S), dtype=mx.float32)
+
+    # Flatten batch and query heads to match the extension API:
+    # Q/M/O: (B * H_q, L, D/S), K/V: (B * H, S, D).
+    mask = mx.broadcast_to(mask, (*batch_shape, H_q, L, S))
+    mask = mask.reshape(batch_size * H_q, L, S).astype(mx.float32)
+
+    # The C++ primitive assumes row-contiguous buffers and float32 masks.
+    query = mx.contiguous(query.reshape(batch_size * H_q, L, D))
+    key = mx.contiguous(key.reshape(batch_size * H, S, D))
+    value = mx.contiguous(value.reshape(batch_size * H, S, D))
+    mask = mx.contiguous(mask)
+
+    if tiny_llm_ext is not None and hasattr(tiny_llm_ext, "flash_attention"):
+        output = tiny_llm_ext.flash_attention(
+            query,
+            key,
+            value,
+            mask,
+            factor,
+            is_causal,
+            H,
+            H_q,
+        )
+        return output.reshape(original_shape)
+
+    # Keep task 1 testable before the custom primitive is implemented.
+    query = query.reshape(*batch_shape, H_q, L, D)
+    key = key.reshape(*batch_shape, H, S, D)
+    value = value.reshape(*batch_shape, H, S, D)
+    mask = mask.reshape(*batch_shape, H_q, L, S)
+    return mx.fast.scaled_dot_product_attention(
+        q=query,
+        k=key,
+        v=value,
+        scale=factor,
+        mask=mask,
+    )
