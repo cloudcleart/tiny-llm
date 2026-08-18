@@ -15,8 +15,13 @@
 - [Week 1 Qwen3 Model](./week1-05-qwen3-model.md)
 - [dequantize_linear](./week1-05-qwen3-model.md)
 - [KV Cache](./week2-01-kv-cache.md)
-- [Quantized Matmul](./week2-02-quantized-matmul.md)
-- [Flash Attention](./week2-04-flash-attention.md)
-- [Paged Attention](./week3-02-paged-attention-part2.md)
+- [Benchmarking and Profiling](./week2-02-benchmark-profile.md)
+- [Quantize the Model](./week2-03-quantize-model.md)
+- [Fused Model Kernels](./week2-04-fused-model-kernels.md)
+- [Fused Decode Attention](./week2-05-decode-attention.md)
+- [SIMD-Matrix Prefill](./week2-06-simd-matrix-prefill.md)
+- [Split-K Prefill](./week2-07-split-k-prefill.md)
+- [Flash Attention](./week3-05-flash-attention.md)
+- [Paged Attention](./week3-04-paged-attention-part2.md)
 
 {{#include copyright.md}}
