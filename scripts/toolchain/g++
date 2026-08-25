@@ -1,0 +1,17 @@
+#!/bin/sh
+
+# MLX compiles fused CPU kernels at runtime by invoking `g++`. Some older
+# macOS installations leave SDK header symlinks in /usr/local/include, which
+# the Apple compiler searches before libc++. Supplying an explicit, ordered
+# SDK include set keeps those unrelated system headers out of MLX JIT builds.
+sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
+resource_dir="$(xcrun clang++ -print-resource-dir)"
+
+exec /usr/bin/g++ \
+    -nostdinc \
+    -nostdinc++ \
+    -isystem "$sdk_path/usr/include/c++/v1" \
+    -isystem "$resource_dir/include" \
+    -isystem "$sdk_path/usr/include" \
+    -iframework "$sdk_path/System/Library/Frameworks" \
+    "$@"

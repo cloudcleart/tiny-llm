@@ -6,6 +6,14 @@ from pathlib import Path
 import pytest
 
 
+def configure_mlx_cpu_compiler():
+    """Use the project compiler wrapper for MLX CPU JIT kernels on macOS."""
+    if os.uname().sysname != "Darwin":
+        return
+    toolchain_dir = Path(__file__).resolve().parent / "toolchain"
+    os.environ["PATH"] = f"{toolchain_dir}{os.pathsep}{os.environ['PATH']}"
+
+
 def validate_week_day(args, required=False):
     week_provided = args.week is not None
     day_provided = args.day is not None
@@ -41,6 +49,7 @@ def copy_test(args, skip_if_exists=False, force=False):
 def test(args):
     if not validate_week_day(args):
         return 1
+    configure_mlx_cpu_compiler()
     if args.week is not None:
         copy_test(args, skip_if_exists=True)
         return pytest.main(
@@ -52,6 +61,7 @@ def test(args):
 def test_refsol(args):
     if not validate_week_day(args):
         return 1
+    configure_mlx_cpu_compiler()
     if args.week is not None:
         return pytest.main(
             ["-v", f"tests_refsol/test_week_{args.week}_day_{args.day}.py"]
