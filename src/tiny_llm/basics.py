@@ -39,4 +39,9 @@ def silu(x: mx.array) -> mx.array:
     Returns:
         Tensor with the same shape as x, computed as x * sigmoid(x).
     """
-    return x * mx.sigmoid(x)
+    # Avoid exp(large positive) for negative inputs. Besides remaining stable
+    # for bfloat16, this matches the implementation exercised by the current
+    # course tests over a wider input range.
+    z = mx.exp(-mx.abs(x))
+    sigmoid = mx.where(x < 0, z / (1 + z), 1 / (1 + z))
+    return x * sigmoid
