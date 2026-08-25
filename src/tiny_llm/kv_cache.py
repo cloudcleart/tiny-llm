@@ -90,10 +90,44 @@ class TinyKvFullCache(TinyKvCache):
         mask_length: int | None = None,
         mask: mx.array | str | None = None,
     ) -> tuple[mx.array, mx.array, int, Optional[mx.array]]:
-        pass
+        """
+        Update the full key-value cache and fetch the updated cache.
+
+        Args:
+            key: The key states to append. Shape: (B, H, L_new, D).
+            value: The value states to append. Shape: (B, H, L_new, D).
+            mask_length: The length of the mask (only used in batching mode).
+            mask: The mask to use (only used in batching mode).
+
+        Returns:
+            The updated key cache, updated value cache, total sequence length,
+            and the mask passed through unchanged.
+        """
+        if self.key_values is None:
+            self.key_values = (key, value)
+        else:
+            cached_key, cached_value = self.key_values
+            self.key_values = (
+                mx.concat([cached_key, key], axis=2),
+                mx.concat([cached_value, value], axis=2),
+            )
+
+        self.offset += key.shape[2]
+        key_cache, value_cache = self.key_values
+        return key_cache, value_cache, self.offset, mask
 
     def materialize(self):
-        pass
+        if self.key_values is not None:
+            # MLX evaluates lazily, so force both cached tensors to be computed.
+            mx.eval(*self.key_values)
 
     def rewind(self, n: int):
-        pass
+        if n <= 0 or self.key_values is None:
+            return
+
+        # Clamp the retained sequence length at zero when rewinding past the cache.
+        keep_len = max(self.offset - n, 0)
+        key, value = self.key_values
+        # The sequence dimension is axis 2 for tensors shaped (B, H, L, D).
+        self.key_values = (key[:, :, :keep_len, :], value[:, :, :keep_len, :])
+        self.offset = keep_len
