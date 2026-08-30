@@ -3,6 +3,8 @@ from typing import Any
 
 import mlx.core as mx
 
+from extensions import tiny_llm_ext
+
 
 def dequantize_linear(mx_layer: Any) -> mx.array:
     w = mx.dequantize(
@@ -67,7 +69,25 @@ def quantized_matmul(
     use_simdgroup: bool = False,
     use_split_k: bool = False,
 ) -> mx.array:
-    pass
+    if a.ndim == 0:
+        raise ValueError("quantized_matmul expects at least one activation dimension")
+
+    # The C++ primitive consumes a two-dimensional M x N activation matrix.
+    # Flatten all leading dimensions here and restore them on the lazy output.
+    input_shape = a.shape
+    flat_a = mx.contiguous(a.reshape(-1, input_shape[-1]))
+    result = tiny_llm_ext.quantized_matmul(
+        mx.contiguous(scales),
+        mx.contiguous(biases),
+        group_size,
+        bits,
+        flat_a,
+        mx.contiguous(b),
+        transpose_b=transpose_b,
+        use_simdgroup=use_simdgroup,
+        use_split_k=use_split_k,
+    )
+    return result.reshape(*input_shape[:-1], result.shape[-1])
 
 
 def dequantize_weights(
@@ -133,7 +153,16 @@ def quantized_matvec_custom(
     b: mx.array,
     transpose_b: bool = False,
 ) -> mx.array:
-    pass
+    return quantized_matmul(
+        scales=scales,
+        biases=biases,
+        group_size=group_size,
+        bits=bits,
+        a=a,
+        b=b,
+        transpose_b=transpose_b,
+        use_simdgroup=True,
+    )
 
 
 def quantized_matmul_vanilla(
@@ -145,7 +174,16 @@ def quantized_matmul_vanilla(
     b: mx.array,
     transpose_b: bool = False,
 ) -> mx.array:
-    pass
+    return quantized_matmul(
+        scales=scales,
+        biases=biases,
+        group_size=group_size,
+        bits=bits,
+        a=a,
+        b=b,
+        transpose_b=transpose_b,
+        use_simdgroup=False,
+    )
 
 
 def quantized_linear(
@@ -165,34 +203,31 @@ def quantized_linear(
             f"dimension {expected_input_dim}"
         )
 
-    # The extension consumes raw row-contiguous buffers rather than arbitrary
-    # MLX views, so normalize layout once at this Python-to-extension boundary.
-    scales = mx.contiguous(w.scales)
-    biases = None if w.biases is None else mx.contiguous(w.biases)
-    activations = mx.contiguous(x)
-    packed_weight = mx.contiguous(w.weight)
+    if w.biases is None:
+        raise ValueError("quantized_linear requires affine quantization biases")
+
     num_rows = prod(x.shape[:-1])
 
     # Decode and other tiny inputs benefit from the cooperative matvec kernel;
     # matrix-shaped prefill stays on the matmul schedule.
     if w.use_simdgroup_matvec and num_rows <= 8:
         result = quantized_matvec_custom(
-            scales=scales,
-            biases=biases,
+            scales=w.scales,
+            biases=w.biases,
             group_size=w.group_size,
             bits=w.bits,
-            a=activations,
-            b=packed_weight,
+            a=x,
+            b=w.weight,
             transpose_b=True,
         )
     else:
         result = quantized_matmul(
-            scales=scales,
-            biases=biases,
+            scales=w.scales,
+            biases=w.biases,
             group_size=w.group_size,
             bits=w.bits,
-            a=activations,
-            b=packed_weight,
+            a=x,
+            b=w.weight,
             transpose_b=True,
             use_simdgroup=w.use_simdgroup_matmul,
             use_split_k=w.use_split_k_matmul,
