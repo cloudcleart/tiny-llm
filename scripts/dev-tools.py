@@ -51,6 +51,15 @@ def test(args):
         return 1
     configure_mlx_cpu_compiler()
     if args.week is not None:
+        if args.week == 4:
+            targets = []
+            for day in range(1, args.day + 1):
+                day_args = argparse.Namespace(week=args.week, day=day)
+                status = copy_test(day_args, force=True)
+                if status:
+                    return status
+                targets.append(f"tests/test_week_{args.week}_day_{day}.py")
+            return pytest.main(["-v", *targets] + args.remainders)
         copy_test(args, skip_if_exists=True)
         return pytest.main(
             ["-v", f"tests/test_week_{args.week}_day_{args.day}.py"] + args.remainders

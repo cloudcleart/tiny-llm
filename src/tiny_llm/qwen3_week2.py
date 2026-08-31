@@ -263,11 +263,17 @@ class Qwen3TransformerBlock:
 
 
 class Qwen3ModelWeek2:
-    def __init__(self, mlx_model: Any, checkpoint: str = "split-k"):
+    def __init__(
+        self,
+        mlx_model: Any,
+        checkpoint: str = "split-k",
+        use_mlx_quantized_linear: bool = False,
+    ):
         """
         Args:
             mlx_model: Qwen3 model loaded by mlx_lm.
             checkpoint: Week 2 optimization checkpoint to construct.
+            use_mlx_quantized_linear: Route quantized projections through MLX.
         """
         if checkpoint not in WEEK2_CHECKPOINTS:
             raise ValueError(
@@ -305,6 +311,7 @@ class Qwen3ModelWeek2:
                     layer,
                     use_simdgroup_matmul=use_simdgroup_matmul,
                     use_split_k_matmul=use_split_k_matmul,
+                    use_mlx_quantized_linear=use_mlx_quantized_linear,
                 )
             return dequantize_linear(layer).astype(self.precision)
 

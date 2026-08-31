@@ -325,7 +325,11 @@ def test_paged_attention_rejects_active_context_shorter_than_query(
 def test_task_3_incremental_decode_matches_week2_with_paged_attention():
     mlx_model = _fake_qwen3_mlx_model()
     week2_model = Qwen3ModelWeek2(mlx_model)
-    week3_model = Qwen3ModelWeek3(mlx_model, page_size=4)
+    week3_model = Qwen3ModelWeek3(
+        mlx_model,
+        page_size=4,
+        use_mlx_quantized_linear=False,
+    )
     inputs = mx.array([[1, 5, 7, 3, 9, 11]], dtype=mx.int32)
     week2_cache = week2_model.create_kv_cache()
     week3_cache = week3_model.create_kv_cache()
@@ -361,7 +365,7 @@ def test_week3_custom_embedding_matches_readable_path():
     )
 
 
-def test_week3_default_inherits_week2_prefill_kernels():
+def test_week3_default_keeps_course_owned_embedding_and_prefill_flags():
     model = Qwen3ModelWeek3(_fake_qwen3_mlx_model())
     assert model.embedding.use_custom_kernel
     assert model.embedding.weight.use_simdgroup_matmul

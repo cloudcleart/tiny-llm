@@ -1,9 +1,18 @@
 """Week 3 Day 1 continuous-batching tests."""
 
+from pathlib import Path
+
 import mlx.core as mx
 import numpy as np
 import pytest
 from mlx_lm import load
+
+if Path(__file__).parent.name == "tests_refsol":
+    import tiny_llm_ref.batch as batch_runtime
+    import tiny_llm_ref.models as model_dispatch
+else:
+    import tiny_llm.batch as batch_runtime
+    import tiny_llm.models as model_dispatch
 
 from .tiny_llm_base import *
 from .utils import *
@@ -206,6 +215,168 @@ def test_task_3_qwen3_4b():
         "Qwen/Qwen3-4B-MLX-4bit",
         seq_len=3,
     )
+
+
+def test_task_3_week3_batch_factory_selects_mlx_projections(monkeypatch):
+    mlx_model = object()
+    captured = {}
+
+    def fake_dispatch(model_name, model, week, **kwargs):
+        captured.update(
+            model_name=model_name,
+            model=model,
+            week=week,
+            kwargs=kwargs,
+        )
+        return "week3-batch-model"
+
+    monkeypatch.setattr(model_dispatch, "dispatch_model", fake_dispatch)
+
+    result = model_dispatch.dispatch_week3_batch_model("qwen3-0.6b", mlx_model)
+
+    assert result == "week3-batch-model"
+    assert captured == {
+        "model_name": "qwen3-0.6b",
+        "model": mlx_model,
+        "week": 2,
+        "kwargs": {"use_mlx_quantized_linear": True},
+    }
+
+
+def test_task_3_week2_model_keeps_course_projections_by_default():
+    mlx_model = tiny_qwen3_mlx_model()
+    course_model = Qwen3ModelWeek2(mlx_model)
+    week3_batch_model = Qwen3ModelWeek2(
+        mlx_model,
+        use_mlx_quantized_linear=True,
+    )
+
+    assert not course_model.layers_inner[0].self_attn.wq.use_mlx_quantized_linear
+    assert week3_batch_model.layers_inner[0].self_attn.wq.use_mlx_quantized_linear
+
+
+def test_task_3_mlx_projection_selector_is_causal(monkeypatch):
+    calls = []
+
+    def fake_quantized_matmul(x, weight, **kwargs):
+        calls.append((x, weight, kwargs))
+        return mx.full((*x.shape[:-1], weight.shape[0]), 7, dtype=mx.float32)
+
+    monkeypatch.setattr(mx, "quantized_matmul", fake_quantized_matmul)
+    weights = QuantizedWeights(
+        scales=mx.ones((3, 1)),
+        biases=mx.zeros((3, 1)),
+        group_size=4,
+        bits=4,
+        weight=mx.zeros((3, 1), dtype=mx.uint32),
+        use_mlx_quantized_linear=True,
+    )
+    x = mx.ones((2, 4))
+
+    result = quantized_linear(x, weights)
+
+    assert result.tolist() == [[7.0, 7.0, 7.0], [7.0, 7.0, 7.0]]
+    assert len(calls) == 1
+    assert calls[0][2]["scales"] is weights.scales
+    assert calls[0][2]["biases"] is weights.biases
+    assert calls[0][2]["transpose"] is True
+    assert calls[0][2]["group_size"] == 4
+    assert calls[0][2]["bits"] == 4
+
+
+class SchedulerFakeDetokenizer:
+    def __init__(self, _):
+        self.text = ""
+
+    def add_token(self, token):
+        self.text += str(token)
+
+
+class SchedulerFakeTokenizer:
+    eos_token_id = 99
+    _tokenizer = object()
+    detokenizer = SchedulerFakeDetokenizer(_tokenizer)
+
+    def encode(self, prompt, add_special_tokens=False):
+        assert not add_special_tokens
+        return {"a": [10], "bb": [20, 21], "c": [30]}[prompt]
+
+
+class SchedulerFakeModel:
+    num_hidden_layers = 1
+
+    def __init__(self):
+        self.cache_request_ids = {}
+        self.prefill_records = []
+        self.active_slots = []
+        self.next_request_id = 0
+
+    def create_kv_cache(self):
+        cache = TinyKvFullCache()
+        self.cache_request_ids[id(cache)] = self.next_request_id
+        self.next_request_id += 1
+        return [cache]
+
+    def __call__(self, inputs, offsets, cache, logits_to_keep=1):
+        assert logits_to_keep == 1
+        batch_cache = isinstance(cache[0], BatchingKvCache)
+        if batch_cache:
+            self.active_slots.append(
+                tuple(
+                    None
+                    if request_cache is None
+                    else self.cache_request_ids[id(request_cache)]
+                    for request_cache in cache[0].kv_caches
+                )
+            )
+        else:
+            request_id = self.cache_request_ids[id(cache[0])]
+            self.prefill_records.append((request_id, list(offsets), inputs.tolist()))
+
+        sequence_length = 1 if batch_cache else inputs.shape[1]
+        keys = mx.zeros((inputs.shape[0], 1, sequence_length, 1), dtype=mx.float32)
+        if batch_cache:
+            cache[0].update_and_fetch(keys, keys, mask_length=sequence_length)
+        else:
+            cache[0].update_and_fetch(keys, keys)
+
+        next_by_token = {0: 99, 1: 99, 2: 3, 3: 99, 4: 99, 10: 1, 21: 2, 30: 4}
+        logits = mx.zeros((inputs.shape[0], 1, 100), dtype=mx.float32)
+        for row, token in enumerate(inputs[:, -1].tolist()):
+            logits[row, 0, next_by_token[token]] = 1
+        return logits
+
+
+def test_task_4_batch_generate_prefills_reuses_slots_and_orders_results(monkeypatch):
+    monkeypatch.setattr(batch_runtime, "_print_progress", lambda *args: None)
+
+    probe_model = SchedulerFakeModel()
+    probe = batch_runtime.Request(
+        probe_model,
+        SchedulerFakeTokenizer(),
+        "a",
+        prompt_idx=0,
+    )
+    probe.try_prefill()
+    assert probe.is_prefill_done
+    assert probe.offset == 1
+    assert probe.next_token == 1
+
+    model = SchedulerFakeModel()
+    result = batch_runtime.batch_generate(
+        model,
+        SchedulerFakeTokenizer(),
+        ["a", "bb", "c"],
+        batch_size=2,
+    )
+
+    assert result == [(0, "1"), (1, "23"), (2, "4")]
+    assert model.prefill_records == [
+        (0, [0], [[10]]),
+        (1, [0], [[20, 21]]),
+        (2, [0], [[30]]),
+    ]
+    assert model.active_slots == [(0, None), (1, None), (1, 2)]
 
 
 @pytest.mark.skipif(
