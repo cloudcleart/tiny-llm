@@ -1,0 +1,155 @@
+{
+  "source": {
+    "git_commit": "297838e47bbfec279e40ac989ab16914edc4fea3",
+    "git_tracked_dirty": false
+  },
+  "host": {
+    "platform": "macOS-26.3.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "processor": "arm",
+    "python_version": "3.12.10",
+    "mlx_version": "0.32.0",
+    "hardware": {
+      "machine_name": "MacBook Air",
+      "machine_model": "MacBookAir10,1",
+      "chip_type": "Apple M1",
+      "cpu_cores": "proc 8:4:4:0",
+      "gpu_model": "Apple M1",
+      "gpu_cores": "7",
+      "physical_memory": "8 GB"
+    }
+  },
+  "configuration": {
+    "model": "qwen3-0.6b",
+    "solution": "tiny_llm",
+    "suite": "week2",
+    "device": "gpu",
+    "input_len": 128,
+    "output_len": 129,
+    "warmup": 2,
+    "repeats": 4,
+    "seed": 0,
+    "prefill_logits": "all",
+    "offline": true,
+    "cooldown_seconds": 0.0,
+    "variants": [
+      "week1",
+      "week2-kv-cache",
+      "mlx"
+    ]
+  },
+  "execution_order": [
+    [
+      "week1",
+      "week2-kv-cache",
+      "mlx"
+    ],
+    [
+      "mlx",
+      "week2-kv-cache",
+      "week1"
+    ],
+    [
+      "week1",
+      "week2-kv-cache",
+      "mlx"
+    ],
+    [
+      "mlx",
+      "week2-kv-cache",
+      "week1"
+    ]
+  ],
+  "results": {
+    "week1": {
+      "label": "Week 1 readable",
+      "samples": [
+        {
+          "prefill": 501.12,
+          "decode": 2.82,
+          "output": 2.81
+        },
+        {
+          "prefill": 413.49,
+          "decode": 2.12,
+          "output": 2.13
+        },
+        {
+          "prefill": 473.46,
+          "decode": 1.92,
+          "output": 1.93
+        },
+        {
+          "prefill": 463.85,
+          "decode": 1.86,
+          "output": 1.87
+        }
+      ],
+      "median": {
+        "prefill": 468.655,
+        "decode": 2.02,
+        "output": 2.03
+      }
+    },
+    "week2-kv-cache": {
+      "label": "2.1 KV cache",
+      "samples": [
+        {
+          "prefill": 836.16,
+          "decode": 27.96,
+          "output": 27.25
+        },
+        {
+          "prefill": 847.01,
+          "decode": 26.8,
+          "output": 26.17
+        },
+        {
+          "prefill": 689.95,
+          "decode": 18.02,
+          "output": 17.66
+        },
+        {
+          "prefill": 696.15,
+          "decode": 18.88,
+          "output": 18.51
+        }
+      ],
+      "median": {
+        "prefill": 766.155,
+        "decode": 22.84,
+        "output": 22.340000000000003
+      }
+    },
+    "mlx": {
+      "label": "MLX",
+      "samples": [
+        {
+          "prefill": 707.91,
+          "decode": 95.88,
+          "output": 85.06
+        },
+        {
+          "prefill": 707.39,
+          "decode": 95.13,
+          "output": 84.46
+        },
+        {
+          "prefill": 468.27,
+          "decode": 43.94,
+          "output": 40.46
+        },
+        {
+          "prefill": 436.8,
+          "decode": 42.94,
+          "output": 39.38
+        }
+      ],
+      "median": {
+        "prefill": 587.8299999999999,
+        "decode": 69.535,
+        "output": 62.459999999999994
+      }
+    }
+  }
+}

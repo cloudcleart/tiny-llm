@@ -1,0 +1,120 @@
+{
+  "source": {
+    "git_commit": "297838e47bbfec279e40ac989ab16914edc4fea3",
+    "git_tracked_dirty": false
+  },
+  "host": {
+    "platform": "macOS-26.3.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "processor": "arm",
+    "python_version": "3.12.10",
+    "mlx_version": "0.32.0",
+    "hardware": {
+      "machine_name": "MacBook Air",
+      "machine_model": "MacBookAir10,1",
+      "chip_type": "Apple M1",
+      "cpu_cores": "proc 8:4:4:0",
+      "gpu_model": "Apple M1",
+      "gpu_cores": "7",
+      "physical_memory": "8 GB"
+    }
+  },
+  "configuration": {
+    "model": "qwen3-0.6b",
+    "solution": "tiny_llm",
+    "suite": "week2",
+    "device": "gpu",
+    "input_len": 128,
+    "output_len": 129,
+    "warmup": 2,
+    "repeats": 4,
+    "seed": 0,
+    "prefill_logits": "last",
+    "offline": true,
+    "cooldown_seconds": 0.0,
+    "variants": [
+      "week2-kv-cache",
+      "mlx"
+    ]
+  },
+  "execution_order": [
+    [
+      "week2-kv-cache",
+      "mlx"
+    ],
+    [
+      "mlx",
+      "week2-kv-cache"
+    ],
+    [
+      "week2-kv-cache",
+      "mlx"
+    ],
+    [
+      "mlx",
+      "week2-kv-cache"
+    ]
+  ],
+  "results": {
+    "week2-kv-cache": {
+      "label": "2.1 KV cache",
+      "samples": [
+        {
+          "prefill": 1007.11,
+          "decode": 29.98,
+          "output": 29.31
+        },
+        {
+          "prefill": 1028.32,
+          "decode": 29.17,
+          "output": 28.57
+        },
+        {
+          "prefill": 1022.7,
+          "decode": 23.86,
+          "output": 23.45
+        },
+        {
+          "prefill": 867.75,
+          "decode": 25.04,
+          "output": 24.51
+        }
+      ],
+      "median": {
+        "prefill": 1014.905,
+        "decode": 27.105,
+        "output": 26.54
+      }
+    },
+    "mlx": {
+      "label": "MLX",
+      "samples": [
+        {
+          "prefill": 941.47,
+          "decode": 102.09,
+          "output": 92.78
+        },
+        {
+          "prefill": 940.53,
+          "decode": 104.4,
+          "output": 94.67
+        },
+        {
+          "prefill": 818.11,
+          "decode": 88.66,
+          "output": 80.58
+        },
+        {
+          "prefill": 805.52,
+          "decode": 87.66,
+          "output": 79.63
+        }
+      ],
+      "median": {
+        "prefill": 879.3199999999999,
+        "decode": 95.375,
+        "output": 86.68
+      }
+    }
+  }
+}

@@ -28,10 +28,34 @@ class FastRoPE:
         base: int = 10000,
         traditional: bool = False,
     ):
-        pass
+        self.dims = dims
+        self.seq_len = seq_len
+        self.base = base
+        self.traditional = traditional
 
     def __call__(self, x: mx.array, offset: int | list[int] | mx.array = 0) -> mx.array:
-        pass
+        if x.ndim != 4:
+            raise ValueError("FastRoPE expects input with shape [B, L, H, D]")
+
+        batch_size = x.shape[0]
+        if isinstance(offset, int):
+            offset = mx.full((batch_size,), offset, dtype=mx.int32)
+        elif isinstance(offset, list):
+            if len(offset) != batch_size:
+                raise ValueError("FastRoPE needs one offset per batch row")
+            offset = mx.array(offset, dtype=mx.int32)
+        elif offset.ndim == 0:
+            offset = mx.broadcast_to(offset.astype(mx.int32), (batch_size,))
+        elif offset.shape != (batch_size,):
+            raise ValueError("FastRoPE needs one offset per batch row")
+
+        return tiny_llm_ext.rope(
+            mx.contiguous(x),
+            mx.contiguous(offset.astype(mx.int32)),
+            self.dims,
+            self.base,
+            self.traditional,
+        )
 
 
 def swiglu(gate: mx.array, up: mx.array) -> mx.array:
