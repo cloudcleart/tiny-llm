@@ -59,7 +59,7 @@ class FastRoPE:
 
 
 def swiglu(gate: mx.array, up: mx.array) -> mx.array:
-    pass
+    return tiny_llm_ext.swiglu(mx.contiguous(gate), mx.contiguous(up))
 
 
 def scaled_dot_product_attention(

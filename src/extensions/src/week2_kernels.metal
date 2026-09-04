@@ -187,6 +187,23 @@ template <typename T>
     }
 }
 
+template <typename T>
+[[kernel]] void week2_swiglu(
+    device const T* gate [[buffer(0)]],
+    device const T* up [[buffer(1)]],
+    device T* out [[buffer(2)]],
+    constant const int& size [[buffer(3)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index >= static_cast<uint>(size)) {
+        return;
+    }
+
+    const float gate_value = static_cast<float>(gate[index]);
+    const float up_value = static_cast<float>(up[index]);
+    const float silu = gate_value / (1.0f + exp(-gate_value));
+    out[index] = static_cast<T>(silu * up_value);
+}
+
 // Week 2, Day 4:
 //   week2_rms_norm
 //   week2_rope
@@ -203,3 +220,6 @@ instantiate_kernel("week2_rms_norm_bf16", week2_rms_norm, bfloat16_t);
 instantiate_kernel("week2_rope_f32", week2_rope, float);
 instantiate_kernel("week2_rope_f16", week2_rope, half);
 instantiate_kernel("week2_rope_bf16", week2_rope, bfloat16_t);
+instantiate_kernel("week2_swiglu_f32", week2_swiglu, float);
+instantiate_kernel("week2_swiglu_f16", week2_swiglu, half);
+instantiate_kernel("week2_swiglu_bf16", week2_swiglu, bfloat16_t);

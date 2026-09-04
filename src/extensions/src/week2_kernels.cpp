@@ -63,8 +63,12 @@ mx::array rope(const mx::array &x, const mx::array &offsets, int dims, float bas
                      {x, offsets});
 }
 
-mx::array swiglu(const mx::array &, const mx::array &, mx::StreamOrDevice) {
-    checkpoint_todo("swiglu", "Week 2, Day 4");
+mx::array swiglu(const mx::array &gate, const mx::array &up, mx::StreamOrDevice s) {
+    require_float_dtype(gate, "swiglu");
+    if (gate.dtype() != up.dtype() || gate.shape() != up.shape()) {
+        throw std::runtime_error("swiglu: gate and up must have the same shape and dtype");
+    }
+    return mx::array(gate.shape(), gate.dtype(), std::make_shared<Week2SwiGLU>(to_stream(s)), {gate, up});
 }
 
 void Week2RMSNorm::eval_cpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
@@ -238,12 +242,41 @@ void Week2RoPE::eval_gpu(const std::vector<mx::array> &, std::vector<mx::array> 
 #endif
 
 void Week2SwiGLU::eval_cpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
-    checkpoint_todo("Week2SwiGLU::eval_cpu", "Week 2, Day 4");
+    throw std::runtime_error("swiglu: the course extension is GPU-only");
 }
 
-void Week2SwiGLU::eval_gpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
-    checkpoint_todo("Week2SwiGLU::eval_gpu", "Week 2, Day 4");
+#ifdef _METAL_
+
+void Week2SwiGLU::eval_gpu(const std::vector<mx::array> &inputs, std::vector<mx::array> &outputs) {
+    const auto &gate = inputs[0];
+    const auto &up = inputs[1];
+    auto &out = outputs[0];
+    out.set_data(mx::allocator::malloc(out.nbytes()));
+
+    auto &device = mx::metal::device(stream().device);
+    auto kernel = device.get_kernel(
+        std::string("week2_swiglu_") + dtype_suffix(out),
+        device.get_library("tiny_llm_ext"));
+
+    auto &encoder = mx::metal::get_command_encoder(stream());
+    encoder.set_compute_pipeline_state(kernel);
+    encoder.set_input_array(gate, 0);
+    encoder.set_input_array(up, 1);
+    encoder.set_output_array(out, 2);
+
+    const int size = out.size();
+    encoder.set_bytes(size, 3);
+    const size_t threads = std::min<size_t>(out.size(), kernel->maxTotalThreadsPerThreadgroup());
+    encoder.dispatch_threads(MTL::Size(out.size(), 1, 1), MTL::Size(threads, 1, 1));
 }
+
+#else
+
+void Week2SwiGLU::eval_gpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
+    throw std::runtime_error("Metal unavailable");
+}
+
+#endif
 
 // Week 2, Day 5.
 mx::array decode_attention(const mx::array &, const mx::array &, const mx::array &, const mx::array &, float, bool,
