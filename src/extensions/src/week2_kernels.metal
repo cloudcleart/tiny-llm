@@ -204,15 +204,135 @@ template <typename T>
     out[index] = static_cast<T>(silu * up_value);
 }
 
-// Week 2, Day 4:
-//   week2_rms_norm
-//   week2_rope
-//   week2_swiglu
-// Week 2, Day 5:
-//   week2_decode_attention
-//
-// Add each [[kernel]] function when its task asks for it. The C++ starter
-// wrapper and binding already exist, but remain fail-closed until then.
+// One threadgroup handles a query row; SIMD groups partition S and lanes partition D.
+// Update softmax state and weighted V immediately, without storing full scores/probabilities.
+template <typename T>
+[[kernel]] void week2_decode_attention(
+    device const T* q [[buffer(0)]],
+    device const T* k [[buffer(1)]],
+    device const T* v [[buffer(2)]],
+    device const float* mask [[buffer(3)]],
+    device T* out [[buffer(4)]],
+    constant const int& length [[buffer(5)]],
+    constant const int& context [[buffer(6)]],
+    constant const int& dim [[buffer(7)]],
+    constant const int& heads [[buffer(8)]],
+    constant const int& kv_heads [[buffer(9)]],
+    constant const float& scale [[buffer(10)]],
+    constant const int& is_causal [[buffer(11)]],
+    constant const int& has_mask [[buffer(12)]],
+    constant const int& groups [[buffer(13)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint group [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    // row = (batch * H_q + head) * L + query_position。
+    // query_head includes the batch offset; kv_head must include that offset as well.
+    const int query_head = row / length;
+    const int query_position = row % length;
+    const int batch = query_head / heads;
+    const int kv_head = batch * kv_heads + (query_head % heads) / (heads / kv_heads);
+    const size_t kv_base = size_t(kv_head) * context * dim;
+    const size_t q_base = size_t(row) * dim;
+
+    // Lane t owns dimensions t, t+32, ..., up to 8 elements for D<=256.
+    // Cache scaled Q for reuse across keys; all accumulation uses FP32.
+    float query[8];
+    float accumulator[8];
+    for (int i = 0; i < 8; ++i) {
+        const int d = lane + 32 * i;
+        query[i] = d < dim ? float(q[q_base + d]) * scale : 0.0f;
+        accumulator[i] = 0.0f;
+    }
+    // For positions j already processed by this SIMD group, maintain:
+    // maximum=m，denominator=Σ exp(score_j-m)，accumulator=Σ exp(score_j-m)*V_j。
+    // The accumulator is unnormalized; each lane stores only its assigned dimensions.
+    float maximum = -INFINITY;
+    float denominator = 0.0f;
+    // The query's absolute position is S-L+query_position; end is an exclusive bound.
+    const int end = is_causal ? min(context, context - length + query_position + 1) : context;
+    // Group g visits g, g+groups, ...; groups cover the valid keys without overlap.
+    for (int position = group; position < end; position += groups) {
+        const size_t base = kv_base + size_t(position) * dim;
+        float score = 0.0f;
+        for (int i = 0; i < 8; ++i) {
+            const int d = lane + 32 * i;
+            if (d < dim) {
+                score += query[i] * float(k[base + d]);
+            }
+        }
+        // Sum partial dot products across 32 lanes; every lane receives the full score.
+        score = simd_sum(score);
+        if (has_mask) {
+            score += mask[size_t(row) * context + position];
+        }
+        // Skip masked scores before subtracting an initial -inf maximum, which would yield NaN.
+        if (score == -INFINITY) {
+            continue;
+        }
+        // Rescale the old denominator and accumulator to the new exponential reference:
+        // exp(score_j-old_m) * exp(old_m-new_m) = exp(score_j-new_m)。
+        const float new_maximum = max(maximum, score);
+        const float old_factor = fast::exp(maximum - new_maximum);
+        const float score_factor = fast::exp(score - new_maximum);
+        denominator = denominator * old_factor + score_factor;
+        for (int i = 0; i < 8; ++i) {
+            const int d = lane + 32 * i;
+            if (d < dim) {
+                accumulator[i] = accumulator[i] * old_factor + score_factor * float(v[base + d]);
+            }
+        }
+        maximum = new_maximum;
+    }
+
+    // Shared layout: [groups maxima][groups denominators][groups*D values][total denominator].
+    // Publish local state, then synchronize before reading across groups.
+    threadgroup float* maxima = shared;
+    threadgroup float* denominators = shared + groups;
+    threadgroup float* values = shared + 2 * groups;
+    threadgroup float* total = values + groups * dim;
+    if (lane == 0) {
+        maxima[group] = maximum;
+        denominators[group] = denominator;
+    }
+    for (int i = 0; i < 8; ++i) {
+        const int d = lane + 32 * i;
+        if (d < dim) {
+            values[group * dim + d] = accumulator[i];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // The first group finds the common maximum M and replaces maxima[g] with exp(m_g-M).
+    // Empty or fully masked groups have zero denominators and must receive zero merge weights.
+    if (group == 0) {
+        const float local_max = lane < uint(groups) ? maxima[lane] : -INFINITY;
+        const float common_max = simd_max(local_max);
+        if (lane < uint(groups)) {
+            maxima[lane] = denominators[lane] > 0.0f ? fast::exp(local_max - common_max) : 0.0f;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Once all factors are written, one thread computes sum_g denominator_g * exp(m_g-M).
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (int g = 0; g < groups; ++g) {
+            sum += denominators[g] * maxima[g];
+        }
+        *total = sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Once the denominator is ready, the first D threads each merge one output dimension.
+    if (tid < uint(dim)) {
+        float sum = 0.0f;
+        for (int g = 0; g < groups; ++g) {
+            sum += values[g * dim + tid] * maxima[g];
+        }
+        // Softmax is undefined for a fully masked row; return NaN as the Python oracle does.
+        out[q_base + tid] = T(*total > 0.0f ? sum / *total : NAN);
+    }
+}
 
 instantiate_kernel("week2_rms_norm_f32", week2_rms_norm, float);
 instantiate_kernel("week2_rms_norm_f16", week2_rms_norm, half);
@@ -223,3 +343,6 @@ instantiate_kernel("week2_rope_bf16", week2_rope, bfloat16_t);
 instantiate_kernel("week2_swiglu_f32", week2_swiglu, float);
 instantiate_kernel("week2_swiglu_f16", week2_swiglu, half);
 instantiate_kernel("week2_swiglu_bf16", week2_swiglu, bfloat16_t);
+instantiate_kernel("week2_decode_attention_f32", week2_decode_attention, float);
+instantiate_kernel("week2_decode_attention_f16", week2_decode_attention, half);
+instantiate_kernel("week2_decode_attention_bf16", week2_decode_attention, bfloat16_t);

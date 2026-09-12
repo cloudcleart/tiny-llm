@@ -12,6 +12,7 @@ from .quantize import QuantizedWeights, dequantize_linear, quantized_linear
 from .week2_kernels import (
     FastRMSNorm,
     FastRoPE,
+    decode_attention_custom,
     swiglu,
 )
 
@@ -146,13 +147,30 @@ class Qwen3MultiHeadAttention:
             mask_length=sequence_length,
             mask=mask,
         )
-        output = scaled_dot_product_attention_grouped(
-            query.astype(mx.float32),
-            key.astype(mx.float32),
-            value.astype(mx.float32),
-            scale=self.scale,
-            mask=mask,
-        ).astype(x.dtype)
+        # The custom schedule is validated only for short decode queries and
+        # contexts through 256 tokens. Dense additive masks stay on the
+        # readable path; normal decode uses either no mask or the causal flag.
+        if (
+            self.use_decode_attention
+            and sequence_length <= DECODE_ATTENTION_MAX_QUERY
+            and key.shape[-2] <= DECODE_ATTENTION_MAX_CONTEXT
+            and not isinstance(mask, mx.array)
+        ):
+            output = decode_attention_custom(
+                query,
+                key,
+                value,
+                scale=self.scale,
+                mask=mask,
+            )
+        else:
+            output = scaled_dot_product_attention_grouped(
+                query.astype(mx.float32),
+                key.astype(mx.float32),
+                value.astype(mx.float32),
+                scale=self.scale,
+                mask=mask,
+            ).astype(x.dtype)
 
         output = output.transpose(0, 2, 1, 3).reshape(
             batch_size, sequence_length, self.num_heads * self.head_dim

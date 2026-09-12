@@ -32,10 +32,6 @@ const char *dtype_suffix(const mx::array &x) {
     throw std::runtime_error("unsupported dtype");
 }
 
-[[noreturn]] void checkpoint_todo(const char *function, const char *checkpoint) {
-    throw std::runtime_error(std::string(function) + " is a starter stub; implement it in " + checkpoint);
-}
-
 }  // namespace
 
 // rms_norm
@@ -278,18 +274,83 @@ void Week2SwiGLU::eval_gpu(const std::vector<mx::array> &, std::vector<mx::array
 
 #endif
 
-// Week 2, Day 5.
-mx::array decode_attention(const mx::array &, const mx::array &, const mx::array &, const mx::array &, float, bool,
-                           bool, int, int, mx::StreamOrDevice) {
-    checkpoint_todo("decode_attention", "Week 2, Day 5");
+// Week 2, Day 5: Q=[B*H_q,L,D], K/V=[B*H_kv,S,D], explicit mask=[B*H_q,L,S].
+mx::array decode_attention(const mx::array &q, const mx::array &k, const mx::array &v, const mx::array &mask,
+                           float scale, bool is_causal, bool has_mask, int num_heads, int num_kv_heads,
+                           mx::StreamOrDevice s) {
+    require_float_dtype(q, "decode_attention");
+    if (q.dtype() != k.dtype() || q.dtype() != v.dtype() || mask.dtype() != mx::float32) {
+        throw std::runtime_error("decode_attention: Q/K/V dtypes must match; mask must be float32");
+    }
+    // Validate matching batch sizes inferred from flattened heads to prevent invalid GQA indexing.
+    // D <= 256 matches the Metal register capacity: at most 8 elements per lane (32 * 8).
+    if (q.ndim() != 3 || k.ndim() != 3 || v.ndim() != 3 || k.shape() != v.shape() ||
+        q.shape()[2] != k.shape()[2] || q.shape()[2] <= 0 || q.shape()[2] > 256 ||
+        q.shape()[0] <= 0 || q.shape()[1] <= 0 || k.shape()[1] <= 0 ||
+        num_heads <= 0 || num_kv_heads <= 0 || num_heads % num_kv_heads != 0 ||
+        q.shape()[0] % num_heads != 0 || k.shape()[0] % num_kv_heads != 0 ||
+        q.shape()[0] / num_heads != k.shape()[0] / num_kv_heads) {
+        throw std::runtime_error("decode_attention: incompatible attention shapes (1 <= D <= 256)");
+    }
+    if (has_mask && (mask.ndim() != 3 || mask.shape()[0] != q.shape()[0] ||
+                     mask.shape()[1] != q.shape()[1] || mask.shape()[2] != k.shape()[1])) {
+        throw std::runtime_error("decode_attention: mask must have shape [B*Hq,L,S]");
+    }
+    // Create a lazy node; output allocation and kernel dispatch happen in eval_gpu.
+    return mx::array(q.shape(), q.dtype(),
+                     std::make_shared<Week2DecodeAttention>(to_stream(s), scale, is_causal, has_mask,
+                                                            num_heads, num_kv_heads),
+                     {q, k, v, mask});
 }
 
 void Week2DecodeAttention::eval_cpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
-    checkpoint_todo("Week2DecodeAttention::eval_cpu", "Week 2, Day 5");
+    throw std::runtime_error("decode_attention: the course extension is GPU-only");
 }
 
-void Week2DecodeAttention::eval_gpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
-    checkpoint_todo("Week2DecodeAttention::eval_gpu", "Week 2, Day 5");
+#ifdef _METAL_
+void Week2DecodeAttention::eval_gpu(const std::vector<mx::array> &inputs, std::vector<mx::array> &outputs) {
+    // The kernel uses contiguous linear indices, not strides; Python materializes views.
+    for (const auto &input : inputs) {
+        if (!input.flags().row_contiguous) {
+            throw std::runtime_error("decode_attention: primitive inputs must be row-contiguous");
+        }
+    }
+    const auto &q = inputs[0];
+    const auto &k = inputs[1];
+    auto &out = outputs[0];
+    out.set_data(mx::allocator::malloc(out.nbytes()));
+    auto &device = mx::metal::device(stream().device);
+    auto kernel = device.get_kernel(std::string("week2_decode_attention_") + dtype_suffix(out),
+                                    device.get_library("tiny_llm_ext"));
+    auto &encoder = mx::metal::get_command_encoder(stream());
+    encoder.set_compute_pipeline_state(kernel);
+    // Buffers 0..4 hold Q/K/V/mask/output; all indices must match the Metal signature.
+    for (int i = 0; i < 4; ++i) {
+        encoder.set_input_array(inputs[i], i);
+    }
+    encoder.set_output_array(out, 4);
+    const int length = q.shape()[1], context = k.shape()[1], dim = q.shape()[2];
+    const int is_causal = is_causal_, has_mask = has_mask_;
+    encoder.set_bytes(length, 5);
+    encoder.set_bytes(context, 6);
+    encoder.set_bytes(dim, 7);
+    encoder.set_bytes(num_heads_, 8);
+    encoder.set_bytes(num_kv_heads_, 9);
+    encoder.set_bytes(scale_, 10);
+    encoder.set_bytes(is_causal, 11);
+    encoder.set_bytes(has_mask, 12);
+    // D=128 uses 32 SIMD groups; wider heads use 16 to keep shared memory below 32 KiB.
+    const int groups = dim <= 128 ? 32 : 16;
+    encoder.set_bytes(groups, 13);
+    // Each group stores a maximum, denominator, and D accumulators, plus one total denominator.
+    encoder.set_threadgroup_memory_length((groups * (dim + 2) + 1) * sizeof(float), 0);
+    // Launch B*H_q*L threadgroups, each producing one query's D-dimensional output.
+    encoder.dispatch_threadgroups(MTL::Size(q.shape()[0] * length, 1, 1), MTL::Size(groups * 32, 1, 1));
 }
+#else
+void Week2DecodeAttention::eval_gpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
+    throw std::runtime_error("Metal unavailable");
+}
+#endif
 
 }  // namespace tiny_llm_ext
