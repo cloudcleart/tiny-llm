@@ -1,0 +1,107 @@
+{
+  "model": "Qwen/Qwen3-0.6B-MLX-4bit",
+  "checkpoint": "simd-matmul",
+  "input_shape": [
+    1,
+    9
+  ],
+  "output_shape": [
+    1,
+    1,
+    151936
+  ],
+  "output_dtype": "mlx.core.bfloat16",
+  "capture": "/tmp/day6-model.gputrace",
+  "extension_call_count": 197,
+  "extension_call_groups": [
+    {
+      "activation": [
+        1,
+        9,
+        1024
+      ],
+      "packed_weight": [
+        2048,
+        128
+      ],
+      "use_simdgroup": true,
+      "dtype": "mlx.core.bfloat16",
+      "count": 28
+    },
+    {
+      "activation": [
+        1,
+        9,
+        1024
+      ],
+      "packed_weight": [
+        1024,
+        128
+      ],
+      "use_simdgroup": true,
+      "dtype": "mlx.core.bfloat16",
+      "count": 56
+    },
+    {
+      "activation": [
+        1,
+        9,
+        2048
+      ],
+      "packed_weight": [
+        1024,
+        256
+      ],
+      "use_simdgroup": true,
+      "dtype": "mlx.core.bfloat16",
+      "count": 28
+    },
+    {
+      "activation": [
+        1,
+        9,
+        1024
+      ],
+      "packed_weight": [
+        3072,
+        128
+      ],
+      "use_simdgroup": true,
+      "dtype": "mlx.core.bfloat16",
+      "count": 56
+    },
+    {
+      "activation": [
+        1,
+        9,
+        3072
+      ],
+      "packed_weight": [
+        1024,
+        384
+      ],
+      "use_simdgroup": true,
+      "dtype": "mlx.core.bfloat16",
+      "count": 28
+    },
+    {
+      "activation": [
+        1,
+        1,
+        1024
+      ],
+      "packed_weight": [
+        151936,
+        128
+      ],
+      "use_simdgroup": true,
+      "dtype": "mlx.core.bfloat16",
+      "count": 1
+    }
+  ],
+  "captured_kernel_names": [
+    "quantized_matmul_simdgroup_w4a16_g128_bf16",
+    "quantized_matvec_x4_fast_w4a16_g128_bf16"
+  ],
+  "evidence": "Kernel names extracted from the Metal capture command stream (capture file), not from the metallib."
+}

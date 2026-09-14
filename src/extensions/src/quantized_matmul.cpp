@@ -107,13 +107,17 @@ void QuantizedMatmul::eval_gpu(const std::vector<mx::array> &inputs, std::vector
     auto library = device.get_library("tiny_llm_ext");
     out.set_data(mx::allocator::malloc(out.nbytes()));
 
-    // The Day 3 checkpoint optimizes vector-shaped decode only. Larger M
-    // remains on the inspectable vanilla matrix schedule until Day 6.
+    // Preserve the explicit vanilla oracle; the optimized schedule dispatches
+    // tiny M to Day 3 MatVec and prefill to the Day 6 cooperative matrix tile.
     const bool use_matvec = use_simdgroup_ && M <= 8;
+    const bool use_tiled = use_simdgroup_ && M > 8;
     const char *kernel_name;
     if (use_matvec) {
         kernel_name = out.dtype() == mx::float16 ? "quantized_matvec_x4_fast_w4a16_g128_f16"
                                                  : "quantized_matvec_x4_fast_w4a16_g128_bf16";
+    } else if (use_tiled) {
+        kernel_name = out.dtype() == mx::float16 ? "quantized_matmul_simdgroup_w4a16_g128_f16"
+                                                 : "quantized_matmul_simdgroup_w4a16_g128_bf16";
     } else {
         kernel_name = out.dtype() == mx::float16 ? "quantized_matmul_vanilla_w4a16_g128_f16"
                                                  : "quantized_matmul_vanilla_w4a16_g128_bf16";
@@ -138,6 +142,12 @@ void QuantizedMatmul::eval_gpu(const std::vector<mx::array> &inputs, std::vector
         const int column_tiles = (K + outputs_per_threadgroup - 1) / outputs_per_threadgroup;
         encoder.dispatch_threadgroups(MTL::Size(M * column_tiles, 1, 1),
                                       MTL::Size(simdgroups_per_threadgroup * 32, 1, 1));
+        return;
+    }
+
+    if (use_tiled) {
+        encoder.dispatch_threadgroups(MTL::Size((K + 31) / 32, (M + 31) / 32, 1),
+                                      MTL::Size(128, 1, 1));
         return;
     }
 

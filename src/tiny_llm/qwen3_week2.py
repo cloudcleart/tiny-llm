@@ -447,6 +447,8 @@ class Qwen3ModelWeek2:
                 mask=mask,
             )
 
+        # Select the suffix before normalization and vocabulary projection, so
+        # generation never materializes unused [B, L, vocabulary] logits.
         if logits_to_keep is not None:
             if logits_to_keep <= 0:
                 raise ValueError("logits_to_keep must be positive")

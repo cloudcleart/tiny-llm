@@ -272,6 +272,7 @@ class FakeEmbedding:
 def test_task_5_logits_to_keep_controls_output_length(logits_to_keep, expected_length):
     model = Qwen3ModelWeek2.__new__(Qwen3ModelWeek2)
     model.num_hidden_layers = 0
+    model.use_fast_rope = True
     model.embedding = FakeEmbedding()
     model.layers_inner = []
     model.norm = lambda hidden: hidden
@@ -279,3 +280,96 @@ def test_task_5_logits_to_keep_controls_output_length(logits_to_keep, expected_l
     inputs = mx.array([[1, 2, 3, 4]])
     result = model(inputs, 0, [], logits_to_keep=logits_to_keep)
     assert result.shape == (1, expected_length, 2)
+
+
+@pytest.mark.parametrize("rows,outputs", [(1, 17), (8, 31), (9, 1), (32, 32), (33, 31)])
+def test_day6_dispatch_boundary_matches_mlx(rows, outputs):
+    mx.random.seed(rows * 100 + outputs)
+    inputs = mx.random.normal((rows, 256)).astype(mx.bfloat16)
+    weight = mx.random.normal((outputs, 256)).astype(mx.bfloat16)
+    packed, scales, biases = mx.quantize(weight, group_size=128, bits=4)
+    result = quantized_matmul(
+        scales, biases, 128, 4, inputs, packed, transpose_b=True, use_simdgroup=True
+    )
+    oracle = mx.quantized_matmul(
+        inputs, packed, scales, biases, transpose=True, group_size=128, bits=4
+    )
+    assert result.dtype == mx.bfloat16
+    assert_allclose(result, oracle, mx.bfloat16, atol=0.25, rtol=0.02)
+
+
+@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("keep", [None, 1, 2])
+def test_day6_slice_precedes_vocabulary_projection(monkeypatch, tied, keep):
+    import importlib
+
+    module = importlib.import_module(Qwen3ModelWeek2.__module__)
+    model = Qwen3ModelWeek2(
+        tiny_qwen3_mlx_model(num_hidden_layers=0), checkpoint="simd-matmul"
+    )
+    seen = []
+
+    def project(hidden, *args):
+        seen.append(hidden.shape)
+        return hidden
+
+    if tied:
+        monkeypatch.setattr(model.embedding, "as_linear", project)
+    else:
+        model.w_lm_head = object()
+        monkeypatch.setattr(module, "_linear", project)
+    inputs = mx.array([[1, 2, 3, 4]])
+    result = model(inputs, 0, [], logits_to_keep=keep)
+    expected = 4 if keep is None else keep
+    assert seen == [(1, expected, 128)]
+    assert result.shape == (1, expected, 128)
+
+
+@pytest.mark.parametrize(
+    "transpose,vector", [(False, False), (False, True), (True, False)]
+)
+@pytest.mark.parametrize("valid_rows,valid_columns", [(4, 8), (2, 8), (4, 5), (2, 5)])
+def test_day6_loader_full_and_edge_paths(transpose, vector, valid_rows, valid_columns):
+    extension = (
+        "extensions_ref"
+        if Path(__file__).parent.name == "tests_refsol"
+        else "extensions"
+    )
+    header = (
+        Path(__file__).parents[1] / f"src/{extension}/src/cooperative_matrix.h"
+    ).read_text()
+    height, width = (8, 4) if transpose else (4, 8)
+    stride = width + 8
+    source = f"""
+        threadgroup T tile[{height * stride}];
+        using Loader = tiny_llm::CooperativeTileLoader<T, 4, 8, {stride}, 4,
+            {str(transpose).lower()}, {str(vector).lower()}>;
+        Loader::load(inp, 8, tile, thread_position_in_threadgroup.x,
+                     {valid_rows}, {valid_columns});
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = thread_position_in_threadgroup.x; i < 32; i += 4)
+            out[i] = tile[(i / {width}) * {stride} + i % {width}];
+    """
+    kernel = mx.fast.metal_kernel(
+        name="day6_loader_paths",
+        input_names=["inp"],
+        output_names=["out"],
+        source=source,
+        header=header,
+    )
+    inputs = (mx.arange(32).reshape(4, 8) + 1).astype(mx.bfloat16)
+    result = kernel(
+        inputs=[inputs],
+        template=[("T", mx.bfloat16)],
+        grid=(4, 1, 1),
+        threadgroup=(4, 1, 1),
+        output_shapes=[(height, width)],
+        output_dtypes=[mx.bfloat16],
+    )[0]
+    mask = (mx.arange(4)[:, None] < valid_rows) & (
+        mx.arange(8)[None, :] < valid_columns
+    )
+    expected = mx.where(mask, inputs, 0)
+    if transpose:
+        expected = expected.T
+    assert mx.array_equal(result, expected).item()

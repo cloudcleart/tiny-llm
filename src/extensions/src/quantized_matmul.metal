@@ -1,6 +1,7 @@
 #include <metal_stdlib>
 
 #include "mlx/backend/metal/kernels/utils.h"
+#include "cooperative_matrix.h"
 
 using namespace metal;
 
@@ -168,3 +169,70 @@ instantiate_kernel("quantized_matmul_vanilla_w4a16_g128_f16", quantized_matmul_v
 instantiate_kernel("quantized_matmul_vanilla_w4a16_g128_bf16", quantized_matmul_vanilla_w4a16_g128, bfloat16_t);
 instantiate_kernel("quantized_matvec_x4_fast_w4a16_g128_f16", quantized_matvec_x4_fast_w4a16_g128, half);
 instantiate_kernel("quantized_matvec_x4_fast_w4a16_g128_bf16", quantized_matvec_x4_fast_w4a16_g128, bfloat16_t);
+
+// Host convention: N is reduction width, K is output width. Weights are
+// packed row-major [output, reduction], viewed transposed by the MMA helper.
+template <typename T>
+[[kernel]] void quantized_matmul_simdgroup_w4a16_g128(
+    device const T *scales [[buffer(0)]], device const T *biases [[buffer(1)]],
+    device const T *a [[buffer(2)]], device const uint32_t *b [[buffer(3)]],
+    device T *out [[buffer(4)]], constant int &M [[buffer(5)]],
+    constant int &N [[buffer(6)]], constant int &K [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    ushort simdgroup [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    threadgroup T activation_tile[32 * 40];
+    threadgroup T weight_tile[32 * 40];
+    threadgroup T parameters[64];
+    using Loader = tiny_llm::CooperativeTileLoader<T, 32, 32, 40, 128, false, true>;
+    tiny_llm::CooperativeBlockMMA<T, T, 40> mma(simdgroup, lane);
+    const int row_base = group.y * 32;
+    const int column_base = group.x * 32;
+    const int valid_rows = min(32, M - row_base);
+    const int valid_columns = min(32, K - column_base);
+    const int weight_row = tid / 4;
+    const int weight_pack = tid % 4;
+    const int column = column_base + weight_row;
+    const int groups = N / 128;
+
+    // The API guarantees N % 128 == 0: every group has four full K=32 tiles.
+    for (int quant_group = 0; quant_group < groups; ++quant_group) {
+        if (tid < 32) {
+            const int index = (column_base + tid) * groups + quant_group;
+            parameters[tid] = int(tid) < valid_columns ? scales[index] : T(0);
+            parameters[32 + tid] = int(tid) < valid_columns ? biases[index] : T(0);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const float scale = float(parameters[weight_row]);
+        const float bias = float(parameters[32 + weight_row]);
+#pragma unroll
+        for (int sub_tile = 0; sub_tile < 4; ++sub_tile) {
+            const int reduction = quant_group * 128 + sub_tile * 32;
+            Loader::load(a + row_base * N + reduction, N, activation_tile,
+                         tid, valid_rows, 32);
+            // Four adjacent lanes read four adjacent uint32 packs (32 INT4s).
+            // Both operands are staged once and reused by all four SIMD groups.
+            if (valid_columns == 32 || weight_row < valid_columns) {
+                const uint32_t packed = b[column * (N / 8) + reduction / 8 + weight_pack];
+#pragma unroll
+                for (int value = 0; value < 8; ++value) {
+                    const float q = float((packed >> (4 * value)) & 0xf);
+                    weight_tile[weight_row * 40 + weight_pack * 8 + value] = T(q * scale + bias);
+                }
+            } else {
+#pragma unroll
+                for (int value = 0; value < 8; ++value) {
+                    weight_tile[weight_row * 40 + weight_pack * 8 + value] = T(0);
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            mma.multiply_accumulate(activation_tile, weight_tile);
+            // No group may overwrite operands/parameters still used by another.
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    mma.store_result_safe(out + row_base * K + column_base, K,
+                          short2(valid_columns, valid_rows));
+}
+
+instantiate_kernel("quantized_matmul_simdgroup_w4a16_g128_f16", quantized_matmul_simdgroup_w4a16_g128, half);
+instantiate_kernel("quantized_matmul_simdgroup_w4a16_g128_bf16", quantized_matmul_simdgroup_w4a16_g128, bfloat16_t);
