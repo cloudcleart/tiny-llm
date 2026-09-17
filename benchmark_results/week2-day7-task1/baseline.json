@@ -1,0 +1,319 @@
+{
+  "schema_version": 2,
+  "metadata": {
+    "captured_at_utc": "2026-09-14T15:14:34.153980+00:00",
+    "source": {
+      "git_commit": "03a394b04fa010db93fa89b207e93fbf363a84fc",
+      "git_dirty": false
+    },
+    "host": {
+      "platform": "macOS-26.6.2-arm64-arm-64bit",
+      "machine": "arm64",
+      "processor": "arm",
+      "hardware": {
+        "machine_name": "MacBook Air",
+        "machine_model": "MacBookAir10,1",
+        "chip_type": "Apple M1",
+        "cpu_cores": "proc 8:4:4:0",
+        "gpu_model": "Apple M1",
+        "gpu_cores": "7",
+        "physical_memory": "8 GB"
+      },
+      "mlx_device": {
+        "device_name": "Apple M1",
+        "max_recommended_working_set_size": 5726633984,
+        "memory_size": 8589934592,
+        "architecture": "applegpu_g13g",
+        "max_buffer_length": 4294967296,
+        "resource_limit": 499000
+      }
+    },
+    "software": {
+      "python_version": "3.12.10",
+      "python_executable": "/Users/qxw/Desktop/tiny-llm/.venv/bin/python",
+      "mlx_version": "0.32.0",
+      "mlx_lm_version": "0.31.3",
+      "numpy_version": "2.2.6",
+      "xcode_version": "Xcode 26.5\nBuild version 17F42",
+      "metal_version": "Apple metal version 32023.883 (metalfe-32023.883)\nTarget: air64-apple-darwin25.6.0\nThread model: posix\nInstalledDir: /private/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.42.0.MiY7Fg/Metal.xctoolchain/usr/metal/current/bin"
+    },
+    "model": {
+      "requested": "qwen3-4b",
+      "resolved": "Qwen/Qwen3-4B-MLX-4bit",
+      "configuration": {
+        "model_type": "qwen3",
+        "hidden_size": 2560,
+        "num_hidden_layers": 36,
+        "intermediate_size": 9728,
+        "num_attention_heads": 32,
+        "rms_norm_eps": 1e-06,
+        "vocab_size": 151936,
+        "num_key_value_heads": 8,
+        "max_position_embeddings": 65536,
+        "rope_theta": 1000000,
+        "head_dim": 128,
+        "tie_word_embeddings": true,
+        "rope_scaling": null
+      },
+      "weight_dtype": "mlx.core.uint32",
+      "scale_dtype": "mlx.core.bfloat16",
+      "quantization": {
+        "group_size": 128,
+        "bits": 4
+      }
+    }
+  },
+  "configuration": {
+    "solution": "tiny_llm",
+    "sections": [
+      "prefill-projections"
+    ],
+    "contexts": [
+      32
+    ],
+    "query_lengths": [
+      1
+    ],
+    "context_repeats": 1,
+    "shape_execution_order": [
+      [
+        {
+          "context": 32,
+          "query_length": 1
+        }
+      ]
+    ],
+    "warmup": 5,
+    "iterations": 30,
+    "gqa_ratio": null,
+    "attention_mask": "none",
+    "prefill_projections": [
+      "k"
+    ],
+    "include_split_k": false
+  },
+  "runs": [
+    {
+      "context_repeat": 0,
+      "shape_position": 0,
+      "context": 32,
+      "query_length": 1,
+      "sections": {
+        "prefill-projections": [
+          {
+            "name": "prefill k matmul",
+            "medians_us": {
+              "simd": 1954.9579883459955,
+              "mlx": 1277.478993870318
+            },
+            "samples_us": {
+              "simd": [
+                2086.0000513494015,
+                1867.624989245087,
+                2117.1249682083726,
+                1981.5409905277193,
+                1688.4580254554749,
+                2546.7919767834246,
+                1787.5839839689434,
+                1625.8329851552844,
+                2210.457983892411,
+                1946.7499805614352,
+                2153.2910177484155,
+                2005.0830207765102,
+                2402.167010586709,
+                1946.207950823009,
+                1743.166008964181,
+                2209.666999988258,
+                1190.916053019464,
+                1262.7079850062728,
+                2201.7909795977175,
+                1730.915973894298,
+                2095.0419711880386,
+                2040.8330019563437,
+                1815.4579447582364,
+                2495.9580041468143,
+                2066.750021185726,
+                1603.4169821068645,
+                1695.1250145211816,
+                1584.292040206492,
+                1638.5409981012344,
+                1963.1659961305559
+              ],
+              "mlx": [
+                1746.1670213378966,
+                1269.6670019067824,
+                1902.2919586859643,
+                1411.292003467679,
+                1230.9169978834689,
+                1255.249953828752,
+                951.7910075373948,
+                1397.0420113764703,
+                1144.6250136941671,
+                1056.6669516265392,
+                1493.50002175197,
+                1304.9999834038317,
+                1620.41699513793,
+                1603.8750181905925,
+                1004.084013402462,
+                965.2920416556299,
+                885.9169902279973,
+                1285.2909858338535,
+                918.7500108964741,
+                1330.3339947015047,
+                1090.875011868775,
+                1073.7080010585487,
+                978.1250264495611,
+                1111.6249952465296,
+                1412.4580193310976,
+                1328.7499896250665,
+                2569.250005763024,
+                1578.5000286996365,
+                1198.8329933956265,
+                1556.375005748123
+              ]
+            },
+            "measurement_orders": [
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ],
+              [
+                "mlx",
+                "simd"
+              ],
+              [
+                "simd",
+                "mlx"
+              ]
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "summary": [
+    {
+      "context": 32,
+      "query_length": 1,
+      "sections": {
+        "prefill-projections": [
+          {
+            "name": "prefill k matmul",
+            "medians_us": {
+              "simd": 1954.9579883459955,
+              "mlx": 1277.478993870318
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

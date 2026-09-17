@@ -107,3 +107,31 @@ def test_split_k_request_falls_back_for_larger_prefill_gpu():
         )
         mx.eval(requested, unsplit)
         assert mx.array_equal(requested, unsplit).item()
+
+
+def test_split_k_float16_partial_tiles_gpu():
+    """Exercise the F16 accumulation and merge specializations on edge tiles."""
+    with mx.stream(mx.gpu):
+        mx.random.seed(7)
+        inputs = (mx.random.normal((17, 2560)) * 0.1).astype(mx.float16)
+        weight = (mx.random.normal((1032, 2560)) * 0.1).astype(mx.float16)
+        packed, scales, biases = mx.quantize(weight, group_size=128, bits=4)
+        expected = mx.quantized_matmul(inputs, packed, scales, biases,
+                                       transpose=True, group_size=128, bits=4)
+        actual = quantized_matmul(scales, biases, 128, 4, inputs, packed,
+                                  transpose_b=True, use_simdgroup=True, use_split_k=True)
+        assert_allclose(actual, expected, mx.float16, atol=0.01, rtol=0.01)
+
+
+def test_split_k_request_preserves_decode_gpu():
+    """The split checkpoint must retain the exact one-token matvec path."""
+    with mx.stream(mx.gpu):
+        inputs = mx.random.normal((1, 2560)).astype(mx.bfloat16)
+        weight = mx.random.normal((1024, 2560)).astype(mx.bfloat16)
+        packed, scales, biases = mx.quantize(weight, group_size=128, bits=4)
+        unsplit = quantized_matmul(scales, biases, 128, 4, inputs, packed,
+                                   transpose_b=True, use_simdgroup=True)
+        split = quantized_matmul(scales, biases, 128, 4, inputs, packed,
+                                 transpose_b=True, use_simdgroup=True, use_split_k=True)
+        mx.eval(unsplit, split)
+        assert mx.array_equal(unsplit, split).item()

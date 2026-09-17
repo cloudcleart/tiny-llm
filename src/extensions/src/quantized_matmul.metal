@@ -172,17 +172,16 @@ instantiate_kernel("quantized_matvec_x4_fast_w4a16_g128_bf16", quantized_matvec_
 
 // Host convention: N is reduction width, K is output width. Weights are
 // packed row-major [output, reduction], viewed transposed by the MMA helper.
+// Both kernels compute a 32x32 output tile over [reduction_start, reduction_end).
+// Bounds must be multiples of 128; output_offset is measured in elements.
 template <typename T>
-[[kernel]] void quantized_matmul_simdgroup_w4a16_g128(
-    device const T *scales [[buffer(0)]], device const T *biases [[buffer(1)]],
-    device const T *a [[buffer(2)]], device const uint32_t *b [[buffer(3)]],
-    device T *out [[buffer(4)]], constant int &M [[buffer(5)]],
-    constant int &N [[buffer(6)]], constant int &K [[buffer(7)]],
-    uint3 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-    ushort simdgroup [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
-    threadgroup T activation_tile[32 * 40];
-    threadgroup T weight_tile[32 * 40];
-    threadgroup T parameters[64];
+inline void quantized_matmul_block_w4a16_g128(
+    device const T *scales, device const T *biases,
+    device const T *a, device const uint32_t *b, device T *out,
+    int M, int N, int K, int reduction_start, int reduction_end,
+    int output_offset, threadgroup T *activation_tile,
+    threadgroup T *weight_tile, threadgroup T *parameters,
+    uint3 group, uint tid, ushort simdgroup, ushort lane) {
     using Loader = tiny_llm::CooperativeTileLoader<T, 32, 32, 40, 128, false, true>;
     tiny_llm::CooperativeBlockMMA<T, T, 40> mma(simdgroup, lane);
     const int row_base = group.y * 32;
@@ -192,10 +191,13 @@ template <typename T>
     const int weight_row = tid / 4;
     const int weight_pack = tid % 4;
     const int column = column_base + weight_row;
+    // Partitions share the original buffers: parameter rows still have N/128
+    // entries, activation rows N values, and packed weight rows N/8 words.
     const int groups = N / 128;
 
-    // The API guarantees N % 128 == 0: every group has four full K=32 tiles.
-    for (int quant_group = 0; quant_group < groups; ++quant_group) {
+    // Host supplies equal partitions aligned to full 128-value groups.
+    // Keep full-N strides even when processing only a partition.
+    for (int quant_group = reduction_start / 128; quant_group < reduction_end / 128; ++quant_group) {
         if (tid < 32) {
             const int index = (column_base + tid) * groups + quant_group;
             parameters[tid] = int(tid) < valid_columns ? scales[index] : T(0);
@@ -204,6 +206,7 @@ template <typename T>
         threadgroup_barrier(mem_flags::mem_threadgroup);
         const float scale = float(parameters[weight_row]);
         const float bias = float(parameters[32 + weight_row]);
+        // Reuse this group's scale and bias for four 32-wide reduction tiles.
 #pragma unroll
         for (int sub_tile = 0; sub_tile < 4; ++sub_tile) {
             const int reduction = quant_group * 128 + sub_tile * 32;
@@ -230,9 +233,76 @@ template <typename T>
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
-    mma.store_result_safe(out + row_base * K + column_base, K,
+    // Clip the final tile to valid rows/columns, including in partial planes.
+    mma.store_result_safe(out + output_offset + row_base * K + column_base, K,
                           short2(valid_columns, valid_rows));
+}
+
+template <typename T>
+[[kernel]] void quantized_matmul_simdgroup_w4a16_g128(
+    device const T *scales [[buffer(0)]], device const T *biases [[buffer(1)]],
+    device const T *a [[buffer(2)]], device const uint32_t *b [[buffer(3)]],
+    device T *out [[buffer(4)]], constant int &M [[buffer(5)]],
+    constant int &N [[buffer(6)]], constant int &K [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    ushort simdgroup [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    threadgroup T activation_tile[32 * 40];
+    threadgroup T weight_tile[32 * 40];
+    threadgroup T parameters[64];
+    // The unsplit path covers all of N and writes directly to the output.
+    quantized_matmul_block_w4a16_g128(
+        scales, biases, a, b, out, M, N, K, 0, N, 0,
+        activation_tile, weight_tile, parameters, group, tid, simdgroup, lane);
+}
+
+// Each z partition owns one model-dtype [M, K] plane (BF16 for BF16
+// models). The shared MMA accumulates in FP32 before storing that plane.
+// This store adds a rounding step; the later merge must sum planes in FP32.
+template <typename T>
+[[kernel]] void quantized_matmul_simdgroup_splitk_w4a16_g128(
+    device const T *scales [[buffer(0)]], device const T *biases [[buffer(1)]],
+    device const T *a [[buffer(2)]], device const uint32_t *b [[buffer(3)]],
+    device T *partials [[buffer(4)]], constant int &M [[buffer(5)]],
+    constant int &N [[buffer(6)]], constant int &K [[buffer(7)]],
+    constant int &partition_size [[buffer(8)]], constant int &partition_stride [[buffer(9)]],
+    uint3 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    ushort simdgroup [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    threadgroup T activation_tile[32 * 40];
+    threadgroup T weight_tile[32 * 40];
+    threadgroup T parameters[64];
+    // x/y select the output tile; z selects an equal, group-aligned slice of N.
+    // The host must set partition_size = N / split_k, divisible by 128.
+    const int reduction_start = group.z * partition_size;
+    // partition_stride = M*K gives each partition a disjoint plane, so no
+    // atomics or synchronization between threadgroups are needed here.
+    quantized_matmul_block_w4a16_g128(
+        scales, biases, a, b, partials, M, N, K,
+        reduction_start, reduction_start + partition_size, group.z * partition_stride,
+        activation_tile, weight_tile, parameters, group, tid, simdgroup, lane);
 }
 
 instantiate_kernel("quantized_matmul_simdgroup_w4a16_g128_f16", quantized_matmul_simdgroup_w4a16_g128, half);
 instantiate_kernel("quantized_matmul_simdgroup_w4a16_g128_bf16", quantized_matmul_simdgroup_w4a16_g128, bfloat16_t);
+
+instantiate_kernel("quantized_matmul_simdgroup_splitk_w4a16_g128_f16", quantized_matmul_simdgroup_splitk_w4a16_g128, half);
+instantiate_kernel("quantized_matmul_simdgroup_splitk_w4a16_g128_bf16", quantized_matmul_simdgroup_splitk_w4a16_g128, bfloat16_t);
+
+// One thread owns one output element, summing private planes in FP32.
+// Cast only after the merge to avoid repeated model-dtype rounding.
+template <typename T>
+[[kernel]] void quantized_matmul_splitk_reduce(
+    device const T *partials [[buffer(0)]], device T *out [[buffer(1)]],
+    constant int &elements [[buffer(2)]], constant int &split_k [[buffer(3)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index >= uint(elements)) {
+        return;
+    }
+    float sum = 0.0f;
+    for (int partition = 0; partition < split_k; ++partition) {
+        sum += float(partials[partition * elements + index]);
+    }
+    out[index] = T(sum);
+}
+
+instantiate_kernel("quantized_matmul_splitk_reduce_f16", quantized_matmul_splitk_reduce, half);
+instantiate_kernel("quantized_matmul_splitk_reduce_bf16", quantized_matmul_splitk_reduce, bfloat16_t);

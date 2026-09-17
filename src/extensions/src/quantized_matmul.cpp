@@ -111,10 +111,23 @@ void QuantizedMatmul::eval_gpu(const std::vector<mx::array> &inputs, std::vector
     // tiny M to Day 3 MatVec and prefill to the Day 6 cooperative matrix tile.
     const bool use_matvec = use_simdgroup_ && M <= 8;
     const bool use_tiled = use_simdgroup_ && M > 8;
+    // Split only under-filled prefill grids; these are tuning constants,
+    // not hardware limits. Keep every partition on quantization boundaries.
+    int split_k = 1;
+    if (use_split_k_ && use_tiled) {
+        const int base_groups = ((M + 31) / 32) * ((K + 31) / 32);
+        split_k = std::min({16, std::max(1, 320 / std::max(base_groups, 1)), N / 128});
+        while (split_k > 1 && N % (split_k * 128) != 0) {
+            --split_k;
+        }
+    }
     const char *kernel_name;
     if (use_matvec) {
         kernel_name = out.dtype() == mx::float16 ? "quantized_matvec_x4_fast_w4a16_g128_f16"
                                                  : "quantized_matvec_x4_fast_w4a16_g128_bf16";
+    } else if (split_k > 1) {
+        kernel_name = out.dtype() == mx::float16 ? "quantized_matmul_simdgroup_splitk_w4a16_g128_f16"
+                                                 : "quantized_matmul_simdgroup_splitk_w4a16_g128_bf16";
     } else if (use_tiled) {
         kernel_name = out.dtype() == mx::float16 ? "quantized_matmul_simdgroup_w4a16_g128_f16"
                                                  : "quantized_matmul_simdgroup_w4a16_g128_bf16";
@@ -130,6 +143,39 @@ void QuantizedMatmul::eval_gpu(const std::vector<mx::array> &inputs, std::vector
     encoder.set_input_array(biases, 1);
     encoder.set_input_array(a, 2);
     encoder.set_input_array(b, 3);
+    if (split_k > 1) {
+        auto partial_shape = out.shape();
+        partial_shape.insert(partial_shape.begin(), split_k);
+        mx::array partials(partial_shape, out.dtype(), nullptr, {});
+        partials.set_data(mx::allocator::malloc(partials.nbytes()));
+        // GPU work is asynchronous: retain the private planes until completion.
+        encoder.add_temporary(partials);
+        encoder.set_output_array(partials, 4);
+        encoder.set_bytes(M, 5);
+        encoder.set_bytes(N, 6);
+        encoder.set_bytes(K, 7);
+        const int partition_size = N / split_k;
+        const int elements = M * K;
+        encoder.set_bytes(partition_size, 8);
+        encoder.set_bytes(elements, 9);
+        encoder.dispatch_threadgroups(MTL::Size((K + 31) / 32, (M + 31) / 32, split_k),
+                                      MTL::Size(128, 1, 1));
+
+        const char *reduce_name = out.dtype() == mx::float16
+            ? "quantized_matmul_splitk_reduce_f16" : "quantized_matmul_splitk_reduce_bf16";
+        auto reduce_kernel = device.get_kernel(reduce_name, library);
+        encoder.set_compute_pipeline_state(reduce_kernel);
+        // Register the producer/consumer dependency through the MLX encoder.
+        encoder.set_input_array(partials, 0);
+        encoder.set_output_array(out, 1);
+        encoder.set_bytes(elements, 2);
+        encoder.set_bytes(split_k, 3);
+        const int threads = std::min<int>(256, reduce_kernel->maxTotalThreadsPerThreadgroup());
+        encoder.dispatch_threads(MTL::Size(elements, 1, 1), MTL::Size(threads, 1, 1));
+        return;
+    }
+
+    // A split of one preserves the original kernel and avoids temporary storage.
     encoder.set_output_array(out, 4);
     encoder.set_bytes(M, 5);
     encoder.set_bytes(N, 6);
