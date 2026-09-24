@@ -3,6 +3,8 @@ from typing import Optional
 
 import mlx.core as mx
 
+from .attention import causal_mask
+
 
 class TinyKvCache(ABC):
     @abstractmethod
@@ -52,6 +54,9 @@ class BatchingKvCache(TinyKvCache):
     def __init__(self, max_active_requests: int, max_seq_len: int | None = None):
         self.max_active_requests = max_active_requests
         self.max_seq_len = max_seq_len
+        self.kv_caches: list[TinyKvCache | None] = [None] * max_active_requests
+        self.last_batch_bytes = 0
+        self.staging_copy_bytes = 0
 
     def update_and_fetch(
         self,
@@ -59,8 +64,47 @@ class BatchingKvCache(TinyKvCache):
         values: mx.array,
         mask_length: int | None = None,
         mask: mx.array | str | None = None,
-    ) -> tuple[mx.array, mx.array, int, Optional[mx.array]]:
-        pass
+    ) -> tuple[mx.array, mx.array, None, mx.array]:
+        """Append active rows and right-align their caches in a dense batch."""
+        if keys.ndim != 4 or keys.shape != values.shape:
+            raise ValueError("batch K/V must have matching [B, H, L, D] shapes")
+        if keys.shape[0] != self.max_active_requests:
+            raise ValueError("batch K/V must contain one row per decode slot")
+        if mask_length is None:
+            mask_length = keys.shape[2]
+
+        updated = []
+        source_length = 0
+        for slot, cache in enumerate(self.kv_caches):
+            if cache is None:
+                continue
+            request_keys, request_values, length, _ = cache.update_and_fetch(
+                keys[slot : slot + 1], values[slot : slot + 1]
+            )
+            updated.append((slot, request_keys, request_values, length))
+            source_length = max(source_length, length)
+
+        batch, heads, _, dim = keys.shape
+        shape = (batch, heads, source_length, dim)
+        batched_keys = mx.zeros(shape, dtype=keys.dtype)
+        batched_values = mx.zeros(shape, dtype=values.dtype)
+        batch_mask = mx.full(
+            (batch, 1, mask_length, source_length), -mx.inf, dtype=keys.dtype
+        )
+        copied_bytes = 0
+        for slot, request_keys, request_values, length in updated:
+            start = source_length - length
+            batched_keys[slot, :, start:, :] = request_keys[0, :, :length, :]
+            batched_values[slot, :, start:, :] = request_values[0, :, :length, :]
+            batch_mask[slot, 0, :, start:] = causal_mask(
+                mask_length, length, keys.dtype
+            )
+            copied_bytes += heads * length * dim * (keys.itemsize + values.itemsize)
+
+        self.last_batch_bytes = batched_keys.nbytes + batched_values.nbytes
+        self.staging_copy_bytes += copied_bytes
+        # Per-request lengths are represented by the mask, not a shared offset.
+        return batched_keys, batched_values, None, batch_mask
 
     def update_and_fetch_paged(
         self,
@@ -72,10 +116,19 @@ class BatchingKvCache(TinyKvCache):
         pass
 
     def add_request(self, prefilled: TinyKvCache, id: int):
-        pass
+        if not 0 <= id < self.max_active_requests:
+            raise IndexError("decode slot out of range")
+        if self.kv_caches[id] is not None:
+            raise ValueError("decode slot is already occupied")
+        self.kv_caches[id] = prefilled
 
     def remove_request(self, id: int):
-        pass
+        if not 0 <= id < self.max_active_requests:
+            raise IndexError("decode slot out of range")
+        cache = self.kv_caches[id]
+        if cache is not None:
+            cache.release()
+            self.kv_caches[id] = None
 
 
 class TinyKvFullCache(TinyKvCache):

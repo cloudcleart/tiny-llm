@@ -58,6 +58,27 @@ def test_task_1_rope_multiple_offsets(traditional: bool):
     rope_helper(mx.gpu, traditional, mx.bfloat16)
 
 
+@pytest.mark.parametrize("precision", [mx.float32, mx.float16, mx.bfloat16])
+@pytest.mark.parametrize(
+    "query_length,source_length,allowed",
+    [
+        (3, 3, [[True, False, False], [True, True, False], [True, True, True]]),
+        (2, 4, [[True, True, True, False], [True, True, True, True]]),
+        (1, 4, [[True, True, True, True]]),
+    ],
+    ids=["prefill", "cached-prefill", "decode"],
+)
+def test_task_1_rectangular_causal_mask(
+    precision, query_length, source_length, allowed
+):
+    mask = causal_mask(query_length, source_length, precision)
+
+    assert mask.shape == (query_length, source_length)
+    assert mask.dtype == precision
+    expected = np.where(np.array(allowed), 0.0, -np.inf)
+    np.testing.assert_array_equal(np.array(mask.astype(mx.float32)), expected)
+
+
 def test_task_2_batching_kv_cache():
     cache = BatchingKvCache(max_active_requests=3)
     assert cache.max_seq_len is None
@@ -136,6 +157,43 @@ def test_task_2_batching_kv_cache():
     assert cache.staging_copy_bytes == 56
 
 
+def test_task_2_batching_kv_cache_reuses_slots_without_stale_history():
+    cache = BatchingKvCache(max_active_requests=2)
+    old_request = TinyKvFullCache()
+    history = mx.array([10.0, 11.0]).reshape(1, 1, 2, 1)
+    old_request.update_and_fetch(history, history + 100)
+    survivor = TinyKvFullCache()
+    cache.add_request(old_request, 0)
+    cache.add_request(survivor, 1)
+
+    tokens = mx.array([12.0, 20.0]).reshape(2, 1, 1, 1)
+    cache.update_and_fetch(tokens, tokens + 100)
+    cache.remove_request(0)
+
+    # Removing the longest request shrinks the batch; its inactive row stays masked.
+    tokens = mx.array([999.0, 21.0]).reshape(2, 1, 1, 1)
+    keys, values, _, mask = cache.update_and_fetch(tokens, tokens + 100)
+    assert keys.reshape(2, 2).tolist() == [[0.0, 0.0], [20.0, 21.0]]
+    assert values.reshape(2, 2).tolist() == [[0.0, 0.0], [120.0, 121.0]]
+    assert mask.reshape(2, 2).tolist() == [[-float("inf"), -float("inf")], [0, 0]]
+    assert old_request.offset == 3
+
+    replacement = TinyKvFullCache()
+    cache.add_request(replacement, 0)
+    tokens = mx.array([30.0, 22.0]).reshape(2, 1, 1, 1)
+    keys, values, _, mask = cache.update_and_fetch(tokens, tokens + 100)
+    assert keys.reshape(2, 3).tolist() == [[0.0, 0.0, 30.0], [20.0, 21.0, 22.0]]
+    assert values.reshape(2, 3).tolist() == [[0.0, 0.0, 130.0], [120.0, 121.0, 122.0]]
+    assert mask.reshape(2, 3).tolist() == [
+        [-float("inf"), -float("inf"), 0],
+        [0, 0, 0],
+    ]
+    assert replacement.offset == 1
+    assert survivor.offset == 3
+    assert cache.last_batch_bytes == 48
+    assert cache.staging_copy_bytes == 80
+
+
 def helper_test_task_3(
     model_name: str,
     seq_len: int,
@@ -146,7 +204,7 @@ def helper_test_task_3(
     max_seq_len = seq_len
 
     mlx_model, tokenizer = load(model_name)
-    model = Qwen3ModelWeek2(mlx_model)
+    model = model_dispatch.dispatch_week3_batch_model(model_name, mlx_model)
     for _ in range(iters):
         cache = [
             BatchingKvCache(requests, max_seq_len)
@@ -253,6 +311,49 @@ def test_task_3_week2_model_keeps_course_projections_by_default():
 
     assert not course_model.layers_inner[0].self_attn.wq.use_mlx_quantized_linear
     assert week3_batch_model.layers_inner[0].self_attn.wq.use_mlx_quantized_linear
+
+    for model, enabled in [(course_model, False), (week3_batch_model, True)]:
+        weights = [model.embedding.weight]
+        if model.w_lm_head is not None:
+            weights.append(model.w_lm_head)
+        for layer in model.layers_inner:
+            weights.extend(
+                [
+                    layer.self_attn.wq,
+                    layer.self_attn.wk,
+                    layer.self_attn.wv,
+                    layer.self_attn.wo,
+                    layer.mlp.w_gate,
+                    layer.mlp.w_up,
+                    layer.mlp.w_down,
+                ]
+            )
+        assert all(w.use_mlx_quantized_linear == enabled for w in weights)
+
+
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_task_3_mlx_projection_matches_dequantized_batch(with_bias):
+    dense = mx.sin(mx.arange(8 * 64, dtype=mx.float32)).reshape(8, 64)
+    packed, scales, biases = mx.quantize(dense, group_size=32, bits=4)
+    weights = QuantizedWeights(
+        scales=scales,
+        biases=biases,
+        group_size=32,
+        bits=4,
+        weight=packed,
+        use_mlx_quantized_linear=True,
+    )
+    x = mx.cos(mx.arange(2 * 3 * 64, dtype=mx.float32)).reshape(2, 3, 64)
+    bias = mx.arange(8, dtype=mx.float32) if with_bias else None
+    expected = x @ mx.dequantize(packed, scales, biases, group_size=32, bits=4).T
+    if bias is not None:
+        expected = expected + bias
+
+    actual = quantized_linear(x, weights, bias)
+    assert actual.shape == (2, 3, 8)
+    np.testing.assert_allclose(
+        np.array(actual), np.array(expected), rtol=1e-5, atol=1e-5
+    )
 
 
 def test_task_3_mlx_projection_selector_is_causal(monkeypatch):
@@ -387,3 +488,45 @@ def test_task_3_qwen3_1_7b():
         "Qwen/Qwen3-1.7B-MLX-4bit",
         seq_len=3,
     )
+
+
+@pytest.mark.parametrize("limit,expected", [(2, ""), (3, "2"), (4, "23")])
+def test_task_4_length_limit_includes_prompt(monkeypatch, limit, expected):
+    monkeypatch.setattr(batch_runtime, "_print_progress", lambda *args: None)
+    model = SchedulerFakeModel()
+    prompts = ["bb"]
+    result = batch_runtime.batch_generate(
+        model, SchedulerFakeTokenizer(), prompts, max_seq_len=limit, prefill_step=1
+    )
+    assert result == [(0, expected)]
+    assert prompts == ["bb"]
+    if limit > 2:
+        assert model.prefill_records == [(0, [0], [[20, 21]])]
+
+
+def test_task_4_rejects_long_prompt_before_cache_creation(monkeypatch):
+    monkeypatch.setattr(batch_runtime, "_print_progress", lambda *args: None)
+    model = SchedulerFakeModel()
+    with pytest.raises(ValueError, match="max_seq_len"):
+        batch_runtime.batch_generate(
+            model, SchedulerFakeTokenizer(), ["bb"], max_seq_len=1
+        )
+    assert model.next_request_id == 0
+    assert model.prefill_records == []
+
+
+def test_task_4_immediate_eos_returns_completion_order(monkeypatch):
+    monkeypatch.setattr(batch_runtime, "_print_progress", lambda *args: None)
+
+    class Tokenizer(SchedulerFakeTokenizer):
+        def encode(self, prompt, add_special_tokens=False):
+            return (
+                [0] if prompt == "eos" else super().encode(prompt, add_special_tokens)
+            )
+
+    model = SchedulerFakeModel()
+    result = batch_runtime.batch_generate(
+        model, Tokenizer(), ["bb", "eos"], batch_size=1
+    )
+    assert result == [(1, ""), (0, "23")]
+    assert model.active_slots == [(0,), (0,)]
