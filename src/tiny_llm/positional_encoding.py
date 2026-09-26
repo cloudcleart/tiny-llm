@@ -39,7 +39,8 @@ class RoPE:
         """
         Args:
             x: Input tensor with shape (batch, seq_len, num_heads, head_dim).
-            offset: Absolute position range for x. None means positions start at 0.
+            offset: Shared absolute position range or one range per batch row.
+                None means positions start at 0.
 
         Returns:
             x with RoPE applied, preserving the original shape and dtype.
@@ -50,6 +51,21 @@ class RoPE:
         if offset is None:
             cos_freqs = self.cos_freqs[:L]
             sin_freqs = self.sin_freqs[:L]
+        elif isinstance(offset, list):
+            assert len(offset) == N, "offset must contain one slice per batch row"
+            for position_range in offset:
+                assert isinstance(position_range, slice), (
+                    "offset entries must be slices"
+                )
+                assert position_range.stop - position_range.start == L, (
+                    f"offset must be of length {L}"
+                )
+            cos_freqs = mx.stack(
+                [self.cos_freqs[position_range] for position_range in offset]
+            )
+            sin_freqs = mx.stack(
+                [self.sin_freqs[position_range] for position_range in offset]
+            )
         else:
             # During generation, the input may start at a later absolute position.
             assert isinstance(offset, slice), "offset must be None or a slice"
@@ -58,8 +74,8 @@ class RoPE:
             sin_freqs = self.sin_freqs[offset]
 
         # Broadcast position frequencies over the batch and attention heads.
-        cos_freqs = cos_freqs.reshape(1, L, 1, self.half_dims)
-        sin_freqs = sin_freqs.reshape(1, L, 1, self.half_dims)
+        cos_freqs = cos_freqs.reshape(-1, L, 1, self.half_dims)
+        sin_freqs = sin_freqs.reshape(-1, L, 1, self.half_dims)
 
         if self.traditional:
             # Traditional RoPE treats adjacent values as complex pairs: (0, 1), (2, 3), ...

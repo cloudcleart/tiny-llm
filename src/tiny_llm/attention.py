@@ -139,6 +139,11 @@ class SimpleMultiHeadAttention:
 
 
 def causal_mask(L: int, S: int, dtype: mx.Dtype) -> mx.array:
+    """Return an additive (L, S) mask for a chunk following S - L cached tokens.
+
+    Query row i has absolute position S - L + i, so it may attend to key
+    columns j <= S - L + i. Allowed entries are zero; future entries are -inf.
+    """
     # When S > L, the extra key/value positions are already-existing context.
     # Shift the causal diagonal right so queries can attend to that history.
     mask = mx.tril(mx.ones((L, S)), k=S - L)

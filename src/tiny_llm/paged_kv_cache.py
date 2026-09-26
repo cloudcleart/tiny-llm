@@ -18,7 +18,9 @@ class PagedKvMetadata:
 
 class TinyKvPagedPool:
     def __init__(self, page_size: int = 128):
-        pass
+        self.page_size = page_size
+        self.key_pages = None
+        self.value_pages = None
 
     @property
     def num_pages(self) -> int:
@@ -49,7 +51,7 @@ class TinyKvPagedPool:
 
 class TinyKvPagedCache(TinyKvCache):
     def __init__(self, pool: TinyKvPagedPool):
-        pass
+        self.pool = pool
 
     @property
     def num_pages(self) -> int:
@@ -90,7 +92,9 @@ class TinyKvPagedCache(TinyKvCache):
         pass
 
     def materialize(self):
-        pass
+        """Evaluate page writes in place, without gathering a dense KV cache."""
+        if self.pool.key_pages is not None:
+            mx.eval(self.pool.key_pages, self.pool.value_pages)
 
     def rewind(self, n: int):
         pass

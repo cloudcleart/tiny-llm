@@ -23,6 +23,8 @@ class Request:
         prompt_idx: int = 0,
         max_seq_len: int = 512,
     ):
+        if prefill_max_step <= 0:
+            raise ValueError("prefill_max_step must be positive")
         self.prompt = prompt
         tokens = tokenizer.encode(prompt, add_special_tokens=False)
         if len(tokens) > max_seq_len:
@@ -43,18 +45,22 @@ class Request:
         self.prompt_idx = prompt_idx
 
     def try_prefill(self):
-        """Prefill the complete prompt and emit its first token (Day 1)."""
+        """Process one prompt chunk and emit a token only after the final chunk."""
         if self.is_prefill_done:
             raise ValueError("prefill called after done")
-        # Day 1 consumes the full prompt, regardless of the future chunk budget.
-        if self.prefill_tokens.size < self.max_seq_len:
-            token = _step(self.model, self.prefill_tokens[None, :], [0], self.kv_cache)
-            self.offset = self.prefill_tokens.size
-            self.decode_done(token.item(), update_offset=False)
-        else:
-            self.offset = self.prefill_tokens.size
-            self.is_done = True
+        start = self.offset
+        end = min(start + self.prefill_max_step, self.prefill_tokens.size)
+        token = _step(
+            self.model, self.prefill_tokens[None, start:end], [start], self.kv_cache
+        )
+        # Bound MLX's lazy graph before yielding to the next scheduler iteration.
+        for cache in self.kv_cache:
+            cache.materialize()
+        self.offset = end
+        if end < self.prefill_tokens.size:
+            return
         self.is_prefill_done = True
+        self.decode_done(token.item(), update_offset=False)
 
     def decode_done(self, token, update_offset=True):
         # offset counts cached tokens; the newly predicted token is not cached yet.
