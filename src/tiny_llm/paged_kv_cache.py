@@ -3,6 +3,8 @@ from typing import Optional
 
 import mlx.core as mx
 
+from extensions import tiny_llm_ext
+
 from .kv_cache import TinyKvCache
 
 
@@ -17,24 +19,192 @@ class PagedKvMetadata:
 
 
 class TinyKvPagedPool:
-    def __init__(self, page_size: int = 128):
-        self.page_size = page_size
-        self.key_pages = None
-        self.value_pages = None
+    """Layer-local physical storage for paged KV.
 
+    The model owns one pool per transformer layer. Request caches for the same
+    layer share that pool, so a physical page id only needs to be unique within
+    its layer.
+    """
+
+    def __init__(self, page_size: int = 128):
+        if page_size <= 0:
+            raise ValueError("page_size must be positive")
+        self.page_size = page_size
+        self._key_pages: mx.array | None = None
+        self._value_pages: mx.array | None = None
+        self.free_page_ids: list[int] = []
+        self.used_page_ids: set[int] = set()
+        self.num_allocated_pages = 0
+        self.reused_page_allocations = 0
+        self.storage_growths = 0
+        self.copied_pages_on_growth = 0
+        self.copied_bytes_on_growth = 0
+
+    # Expose only allocated pages, not unused capacity in the backing tensor.
+    @property
+    def key_pages(self) -> mx.array | None:
+        if self._key_pages is None:
+            return None
+        return self._key_pages[: self.num_pages]
+
+    # Key and value page tensors share the same allocation layout.
+    @property
+    def value_pages(self) -> mx.array | None:
+        if self._value_pages is None:
+            return None
+        return self._value_pages[: self.num_pages]
+
+    # Capacity includes allocated storage slots, including any unused slots.
+    @property
+    def capacity(self) -> int:
+        if self._key_pages is None:
+            return 0
+        return self._key_pages.shape[0]
+
+    # Number of page IDs allocated so far, whether currently used or free.
     @property
     def num_pages(self) -> int:
-        pass
+        return self.num_allocated_pages
 
+    # Page IDs available to be reused by a later request.
     @property
     def num_free_pages(self) -> int:
-        pass
+        return len(self.free_page_ids)
+
+    # Combined byte size of the key and value backing tensors.
+    @property
+    def storage_nbytes(self) -> int:
+        if self._key_pages is None or self._value_pages is None:
+            return 0
+        return self._key_pages.nbytes + self._value_pages.nbytes
+
+    def validate_page_chunk(self, key: mx.array, value: mx.array) -> None:
+        if len(key.shape) != 4 or len(value.shape) != 4:
+            raise ValueError("Paged K/V chunks must be 4D [1, H, S, D]")
+        if key.shape != value.shape:
+            raise ValueError("Paged K/V chunks must have the same shape")
+        B, H, S, D = key.shape
+        if B != 1:
+            raise ValueError("Paged request cache only supports one request")
+        if H <= 0 or D <= 0 or S <= 0:
+            raise ValueError("Paged K/V chunks must have positive valid dimensions")
+        if key.dtype != value.dtype or key.dtype not in (mx.float32, mx.bfloat16):
+            raise ValueError(
+                "Paged K/V chunks must have the same float32 or bfloat16 dtype"
+            )
+        if (self._key_pages is None) != (self._value_pages is None):
+            raise ValueError("Paged K/V storage is incomplete")
+        if self._key_pages is not None and self._value_pages is not None:
+            expected_shape = (H, self.page_size, D)
+            if self._key_pages.shape[1:] != expected_shape:
+                raise ValueError(
+                    "Paged K/V chunks must match the existing page storage shape"
+                )
+            if self._value_pages.shape != self._key_pages.shape:
+                raise ValueError("Paged key and value storage must have the same shape")
+            if (
+                self._key_pages.dtype != key.dtype
+                or self._value_pages.dtype != value.dtype
+            ):
+                raise ValueError(
+                    "Paged K/V chunks must match the existing page storage dtype"
+                )
+
+    # Capture page storage, allocation bookkeeping, and counters for rollback.
+    def _snapshot_state(self) -> tuple:
+        return (
+            self._key_pages,
+            self._value_pages,
+            list(self.free_page_ids),
+            set(self.used_page_ids),
+            self.num_allocated_pages,
+            self.reused_page_allocations,
+            self.storage_growths,
+            self.copied_pages_on_growth,
+            self.copied_bytes_on_growth,
+        )
+
+    # Restore a snapshot if a multi-page cache update fails partway through.
+    def _restore_state(self, state: tuple) -> None:
+        (
+            self._key_pages,
+            self._value_pages,
+            self.free_page_ids,
+            self.used_page_ids,
+            self.num_allocated_pages,
+            self.reused_page_allocations,
+            self.storage_growths,
+            self.copied_pages_on_growth,
+            self.copied_bytes_on_growth,
+        ) = state
 
     def allocate_page(self) -> int:
-        pass
+        # The page id is allocated from a layer-local free list. In this teaching
+        # version, a layer cache owns the page until release/rewind returns it.
+        if self.free_page_ids:
+            page_id = self.free_page_ids.pop()
+            self.reused_page_allocations += 1
+        else:
+            page_id = self.num_pages
+            self.num_allocated_pages += 1
+        self.used_page_ids.add(page_id)
+        return page_id
 
     def read_page(self, page_id: int) -> tuple[mx.array, mx.array]:
-        pass
+        if self._key_pages is None or self._value_pages is None:
+            raise ValueError(f"Page {page_id} has no storage")
+        if page_id < 0 or page_id >= self.num_pages:
+            raise ValueError(f"Page {page_id} is out of range")
+        return (
+            self._key_pages[page_id : page_id + 1],
+            self._value_pages[page_id : page_id + 1],
+        )
+
+    def _ensure_page_storage(self, key: mx.array, value: mx.array) -> None:
+        """Allocate enough backing storage for the current page count."""
+        B, H, _, D = key.shape
+        assert B == 1
+
+        if self._key_pages is not None and self._value_pages is not None:
+            # Existing storage must keep the same per-page layout and dtype.
+            assert self._key_pages.shape[1:] == (H, self.page_size, D)
+            assert self._value_pages.shape == self._key_pages.shape
+            assert self._key_pages.dtype == key.dtype
+            assert self._value_pages.dtype == value.dtype
+            if self.capacity >= self.num_pages:
+                return
+
+        # Grow geometrically to avoid reallocating every time a page is added.
+        new_capacity = max(4, self.num_pages, self.capacity * 2)
+        new_key_pages = mx.zeros((new_capacity, H, self.page_size, D), dtype=key.dtype)
+        new_value_pages = mx.zeros(
+            (new_capacity, H, self.page_size, D), dtype=value.dtype
+        )
+        self.storage_growths += 1
+        if self._key_pages is not None and self._value_pages is not None:
+            # Preserve allocated pages when replacing the backing tensors.
+            old_pages = min(self.num_pages, self.capacity)
+            self.copied_pages_on_growth += old_pages
+            self.copied_bytes_on_growth += (
+                self._key_pages[:old_pages].nbytes
+                + self._value_pages[:old_pages].nbytes
+            )
+            new_key_pages[:old_pages, :, :, :] = self._key_pages[:old_pages]
+            new_value_pages[:old_pages, :, :, :] = self._value_pages[:old_pages]
+        self._key_pages = new_key_pages
+        self._value_pages = new_value_pages
+
+    def reset(self) -> None:
+        if self.used_page_ids:
+            raise ValueError("Cannot reset a page pool with live requests")
+        self._key_pages = None
+        self._value_pages = None
+        self.free_page_ids.clear()
+        self.num_allocated_pages = 0
+        self.reused_page_allocations = 0
+        self.storage_growths = 0
+        self.copied_pages_on_growth = 0
+        self.copied_bytes_on_growth = 0
 
     def write_page_slice(
         self,
@@ -43,22 +213,168 @@ class TinyKvPagedPool:
         key: mx.array,
         value: mx.array,
     ) -> None:
-        pass
+        """Write a K/V chunk into one allocated page starting at ``start``."""
+        # Check tensor rank, matching shapes, batch size, and supported dtype first.
+        self.validate_page_chunk(key, value)
+        if key.shape[2] > self.page_size:
+            raise ValueError("Paged K/V writes cannot exceed one physical page")
+
+        # Only live page IDs may be written, and the requested slice must fit.
+        if page_id not in self.used_page_ids:
+            raise ValueError(f"Page {page_id} is free")
+        if page_id < 0 or page_id >= self.num_pages:
+            raise ValueError(f"Page {page_id} is out of range")
+        end = start + key.shape[2]
+        if start < 0 or end > self.page_size:
+            raise ValueError("Paged K/V write is outside page storage")
+
+        # Ensure backing tensors have room, then confirm their page layout matches.
+        self._ensure_page_storage(key, value)
+        assert self._key_pages is not None
+        assert self._value_pages is not None
+        H, capacity, D = self._key_pages.shape[1:]
+        assert self._value_pages.shape == self._key_pages.shape
+        assert capacity == self.page_size
+        assert key.shape[:2] == (1, H)
+        assert key.shape[3] == D
+        assert 0 <= start <= capacity
+
+        # The extension updates one page in each backing tensor and returns the
+        # updated MLX arrays; contiguous inputs satisfy its buffer requirements.
+        self._key_pages = tiny_llm_ext.paged_cache_update(
+            self._key_pages,
+            mx.contiguous(key),
+            page_id,
+            start,
+        )
+        self._value_pages = tiny_llm_ext.paged_cache_update(
+            self._value_pages,
+            mx.contiguous(value),
+            page_id,
+            start,
+        )
 
     def free_page(self, page_id: int) -> None:
-        pass
+        if page_id not in self.used_page_ids:
+            raise ValueError(f"Page {page_id} is already free")
+        # Keep the page id stable. The stale K/V bytes can stay in the backing
+        # tensor because block_table/page_lens decide which slots are live.
+        self.used_page_ids.remove(page_id)
+        self.free_page_ids.append(page_id)
 
 
 class TinyKvPagedCache(TinyKvCache):
+    """Request-and-layer-local K/V cache backed by a layer page pool.
+
+    Each request gets one cache handle per transformer layer. Cache handles for
+    the same layer share a pool so pages can be recycled across requests.
+    """
+
     def __init__(self, pool: TinyKvPagedPool):
         self.pool = pool
+        self.page_size = self.pool.page_size
+        # Page IDs follow logical token order, not physical allocation order.
+        # All pages except the tail are full; sum(page_lens) always equals offset.
+        self.page_ids: list[int] = []
+        self.page_lens: list[int] = []
+        self.offset = 0
+        self._cached_block_table: mx.array | None = None
+        self._cached_block_table_key: tuple[tuple[int, ...], int] | None = None
 
     @property
     def num_pages(self) -> int:
-        pass
+        return len(self.page_ids)
+
+    @property
+    def key_values(self) -> tuple[mx.array, mx.array] | None:
+        if self.offset == 0:
+            return None
+        return self.gather_dense()
+
+    def _append_chunk(self, key: mx.array, value: mx.array) -> None:
+        self.pool.validate_page_chunk(key, value)
+        S = key.shape[2]
+        # Snapshot metadata and pool references so a multi-page append can roll back.
+        cache_state = self._snapshot_state()
+        pool_state = self.pool._snapshot_state()
+        start = 0
+
+        try:
+            # First fill the existing tail page if it has free slots.
+            if self.page_ids and self.page_lens[-1] < self.page_size:
+                page_id = self.page_ids[-1]
+                page_start = self.page_lens[-1]
+                take = min(self.page_size - page_start, S)
+                self.pool.write_page_slice(
+                    page_id,
+                    page_start,
+                    key[:, :, :take, :],
+                    value[:, :, :take, :],
+                )
+                self.page_lens[-1] += take
+                start += take
+
+            # Then allocate fresh pages for the remaining chunk. We only write
+            # the valid prefix; unused tail slots are ignored by page_lens.
+            while start < S:
+                end = min(start + self.page_size, S)
+                page_id = self.pool.allocate_page()
+                self.pool.write_page_slice(
+                    page_id,
+                    0,
+                    key[:, :, start:end, :],
+                    value[:, :, start:end, :],
+                )
+                self.page_ids.append(page_id)
+                self.page_lens.append(end - start)
+                start = end
+
+            self.offset += S
+        except Exception:
+            # Appends only write beyond the existing sequence, so the valid KV
+            # prefix needs no backup. Restoring allocations and valid lengths
+            # hides any newly written suffix. This handles synchronous failures;
+            # device errors during later MLX evaluation are outside this transaction.
+            self.pool._restore_state(pool_state)
+            self._restore_state(cache_state)
+            raise
+
+    def validate_append(self, key: mx.array, value: mx.array) -> None:
+        self.pool.validate_page_chunk(key, value)
+
+    def _snapshot_state(self) -> tuple:
+        return (
+            list(self.page_ids),
+            list(self.page_lens),
+            self.offset,
+            self._cached_block_table,
+            self._cached_block_table_key,
+        )
+
+    def _restore_state(self, state: tuple) -> None:
+        (
+            self.page_ids,
+            self.page_lens,
+            self.offset,
+            self._cached_block_table,
+            self._cached_block_table_key,
+        ) = state
 
     def gather_dense(self) -> tuple[mx.array, mx.array]:
-        pass
+        assert self.offset > 0
+        # Dense compatibility path for tests and older callers. The paged
+        # attention path uses block_table/context_lens instead of this gather.
+        key_chunks = []
+        value_chunks = []
+        for page_id, page_len in zip(self.page_ids, self.page_lens):
+            key_page, value_page = self.pool.read_page(page_id)
+            assert key_page.shape[2] == self.page_size
+            assert value_page.shape[2] == self.page_size
+            key_chunks.append(key_page[:, :, :page_len, :])
+            value_chunks.append(value_page[:, :, :page_len, :])
+        if len(key_chunks) == 1:
+            return key_chunks[0], value_chunks[0]
+        return mx.concat(key_chunks, axis=2), mx.concat(value_chunks, axis=2)
 
     def update_and_fetch(
         self,
@@ -67,20 +383,48 @@ class TinyKvPagedCache(TinyKvCache):
         mask_length: int | None = None,
         mask: mx.array | str | None = None,
     ) -> tuple[mx.array, mx.array, int, Optional[mx.array]]:
-        pass
+        self._append_chunk(key, value)
+        # Keep the old dense interface for earlier callers. Paged attention
+        # uses update_and_fetch_paged so it can read pages directly.
+        dense_key, dense_value = self.gather_dense()
+        return dense_key, dense_value, self.offset, mask
 
     def block_table(self, max_pages: int | None = None) -> mx.array:
-        pass
+        if max_pages is None:
+            max_pages = self.num_pages
+        assert max_pages >= self.num_pages
+        # Filling the tail only changes context_lens; reuse the table while its
+        # page IDs and padded width remain unchanged.
+        cache_key = (tuple(self.page_ids), max_pages)
+        if (
+            self._cached_block_table is not None
+            and self._cached_block_table_key == cache_key
+        ):
+            return self._cached_block_table
+        # Pad unused entries with -1; context_lens bounds the readable sequence.
+        page_ids = self.page_ids + [-1] * (max_pages - self.num_pages)
+        self._cached_block_table = mx.array([page_ids], dtype=mx.int32)
+        self._cached_block_table_key = cache_key
+        return self._cached_block_table
 
     def context_lens(self) -> mx.array:
-        pass
+        return mx.array([self.offset], dtype=mx.int32)
 
     def paged_metadata(
         self,
         max_pages: int | None = None,
         mask: mx.array | str | None = None,
     ) -> PagedKvMetadata:
-        pass
+        assert self.pool.key_pages is not None
+        assert self.pool.value_pages is not None
+        return PagedKvMetadata(
+            key_pages=self.pool.key_pages,
+            value_pages=self.pool.value_pages,
+            block_table=self.block_table(max_pages=max_pages),
+            context_lens=self.context_lens(),
+            page_size=self.page_size,
+            mask=mask,
+        )
 
     def update_and_fetch_paged(
         self,
@@ -89,15 +433,47 @@ class TinyKvPagedCache(TinyKvCache):
         mask_length: int | None = None,
         mask: mx.array | str | None = None,
     ) -> PagedKvMetadata:
-        pass
+        self._append_chunk(key, value)
+        return self.paged_metadata(mask=mask)
 
     def materialize(self):
-        """Evaluate page writes in place, without gathering a dense KV cache."""
-        if self.pool.key_pages is not None:
-            mx.eval(self.pool.key_pages, self.pool.value_pages)
+        # Evaluate pending pool writes to release the lazy graph without
+        # reconstructing dense K/V.
+        key_pages = self.pool.key_pages
+        value_pages = self.pool.value_pages
+        if key_pages is not None and value_pages is not None:
+            mx.eval(key_pages, value_pages)
 
     def rewind(self, n: int):
-        pass
+        assert 0 <= n <= self.offset
+        new_offset = self.offset - n
+        if new_offset == self.offset:
+            return
+        if new_offset == 0:
+            self.release()
+            return
+
+        target_num_pages = (new_offset + self.page_size - 1) // self.page_size
+        while len(self.page_ids) > target_num_pages:
+            # Whole pages beyond the new logical length return to the shared
+            # allocator. Stale suffix slots in the final page are ignored because
+            # page_lens defines the valid prefix and future writes overwrite them.
+            page_id = self.page_ids.pop()
+            self.page_lens.pop()
+            self.pool.free_page(page_id)
+
+        # Subtraction preserves page_size at a full-page boundary; modulo
+        # would incorrectly give a final page length of zero.
+        last_page_len = new_offset - self.page_size * (target_num_pages - 1)
+        self.page_lens[-1] = last_page_len
+        self.offset = new_offset
 
     def release(self):
-        pass
+        # Return only this request's pages for this layer, leaving other requests
+        # untouched. Clearing the table makes repeated release calls no-ops;
+        # the pool retains its capacity for future requests.
+        for page_id in self.page_ids:
+            self.pool.free_page(page_id)
+        self.page_ids.clear()
+        self.page_lens.clear()
+        self.offset = 0

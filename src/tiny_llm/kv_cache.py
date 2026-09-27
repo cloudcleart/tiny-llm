@@ -1,9 +1,12 @@
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import mlx.core as mx
 
 from .attention import causal_mask
+
+if TYPE_CHECKING:
+    from .paged_kv_cache import PagedKvMetadata
 
 
 class TinyKvCache(ABC):
@@ -57,6 +60,7 @@ class BatchingKvCache(TinyKvCache):
         self.kv_caches: list[TinyKvCache | None] = [None] * max_active_requests
         self.last_batch_bytes = 0
         self.staging_copy_bytes = 0
+        self.HD: tuple[int, int] | None = None
 
     def update_and_fetch(
         self,
@@ -113,7 +117,84 @@ class BatchingKvCache(TinyKvCache):
         mask_length: int | None = None,
         mask: mx.array | str | None = None,
     ) -> "PagedKvMetadata":
-        pass
+        from .paged_kv_cache import PagedKvMetadata, TinyKvPagedCache
+
+        if len(keys.shape) != 4 or len(values.shape) != 4:
+            raise ValueError("Batched K/V chunks must be 4D [B, H, S, D]")
+        if keys.shape != values.shape:
+            raise ValueError("Batched K/V chunks must have the same shape")
+        B, H, S, D = keys.shape
+        if B != self.max_active_requests:
+            raise ValueError(f"Expected batch size {self.max_active_requests}, got {B}")
+        if self.HD is not None and self.HD != (H, D):
+            raise ValueError(f"expect {self.HD} but got {H, D}")
+
+        # Validate the complete active set before any request or allocator is
+        # mutated. In particular, mixed pools must fail before row zero appends.
+        pool = None
+        active_caches = []
+        for b in range(B):
+            cache = self.kv_caches[b]
+            if cache is None:
+                continue
+            if not isinstance(cache, TinyKvPagedCache):
+                raise ValueError("BatchingKvCache contains a non-paged request cache")
+            if pool is None:
+                pool = cache.pool
+            elif pool is not cache.pool:
+                raise ValueError("Paged batch caches must share one page pool")
+            if self.max_seq_len is not None and cache.offset + S > self.max_seq_len:
+                raise ValueError("Paged batch append exceeds max_seq_len")
+            cache.validate_append(keys[b : b + 1], values[b : b + 1])
+            active_caches.append((b, cache))
+
+        if pool is None:
+            raise ValueError("Cannot build paged metadata without active requests")
+
+        # Per-cache rollback cannot undo earlier successful batch rows. Snapshot
+        # the shared pool once and save metadata for every active request.
+        pool_state = pool._snapshot_state()
+        cache_states = [(cache, cache._snapshot_state()) for _, cache in active_caches]
+        old_hd = self.HD
+        context_lens = [0] * B
+        max_pages = 0
+        try:
+            for b, cache in active_caches:
+                cache.update_and_fetch_paged(
+                    keys[b : b + 1],
+                    values[b : b + 1],
+                    mask_length=mask_length,
+                    mask=mask,
+                )
+                context_lens[b] = cache.offset
+                max_pages = max(max_pages, cache.num_pages)
+            self.HD = (H, D)
+        except Exception:
+            pool._restore_state(pool_state)
+            for cache, state in cache_states:
+                cache._restore_state(state)
+            self.HD = old_hd
+            raise
+
+        # Returning shared pages and a block table avoids dense batch KV copies.
+        self.last_batch_bytes = 0
+
+        # Preserve slot order: inactive slots have length zero and -1 page IDs.
+        rows = []
+        for cache in self.kv_caches:
+            if cache is None:
+                rows.append([-1] * max_pages)
+            else:
+                rows.append(cache.page_ids + [-1] * (max_pages - cache.num_pages))
+
+        return PagedKvMetadata(
+            key_pages=pool.key_pages,
+            value_pages=pool.value_pages,
+            block_table=mx.array(rows, dtype=mx.int32),
+            context_lens=mx.array(context_lens, dtype=mx.int32),
+            page_size=pool.page_size,
+            mask=mask,
+        )
 
     def add_request(self, prefilled: TinyKvCache, id: int):
         if not 0 <= id < self.max_active_requests:

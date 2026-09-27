@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1250">
+<style>text{font-family:Helvetica Neue,Arial,PingFang SC,sans-serif;fill:#111827} .sub{fill:#6b7280}</style>
+<defs>
+<marker id="blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#2563eb"/></marker>
+<marker id="green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#059669"/></marker>
+<marker id="gray" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#6b7280"/></marker>
+</defs><rect width="1600" height="1250" fill="white"/>
+<text x="60" y="52" font-size="30" text-anchor="start" class="">当前模型结构 · Qwen3ModelWeek3</text>
+<text x="60" y="86" font-size="18" text-anchor="start" class="sub">Week 3 Day 3  |  Dense Qwen3  |  enable_paged_attention=False</text>
+<text x="280" y="132" font-size="21" text-anchor="middle" class="">① 整体前向与 Transformer Block</text>
+<rect x="140" y="160" width="280" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="280.0" y="187" font-size="19" text-anchor="middle" class="">Token IDs</text>
+<text x="280.0" y="211" font-size="15" text-anchor="middle" class="sub">[B, L]</text>
+<rect x="140" y="264" width="280" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="280.0" y="291" font-size="19" text-anchor="middle" class="">QuantizedEmbedding</text>
+<text x="280.0" y="315" font-size="15" text-anchor="middle" class="sub">[B, L, hidden_size]</text>
+<path d="M280 224 V264" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<rect x="60" y="366" width="470" height="546" rx="14" fill="#fafafa" stroke="#94a3b8" stroke-dasharray="7 5"/>
+<text x="85" y="396" font-size="18" text-anchor="start" class="">Block × N</text>
+<rect x="140" y="426" width="280" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="280.0" y="453" font-size="19" text-anchor="middle" class="">FastRMSNorm</text>
+<text x="280.0" y="477" font-size="15" text-anchor="middle" class="sub">input_layernorm</text>
+<rect x="140" y="530" width="280" height="64" rx="10" fill="#ede9fe" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="280.0" y="557" font-size="19" text-anchor="middle" class="">Self-Attention</text>
+<text x="280.0" y="581" font-size="15" text-anchor="middle" class="sub">右侧展开 →</text>
+<rect x="140" y="634" width="280" height="48" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="280.0" y="661" font-size="19" text-anchor="middle" class="">Residual Add: h = x + attn</text>
+<rect x="140" y="722" width="280" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="280.0" y="749" font-size="19" text-anchor="middle" class="">FastRMSNorm</text>
+<text x="280.0" y="773" font-size="15" text-anchor="middle" class="sub">post_attention_layernorm</text>
+<rect x="140" y="826" width="280" height="64" rx="10" fill="#fff7ed" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="280.0" y="853" font-size="19" text-anchor="middle" class="">MLP + Residual</text>
+<text x="280.0" y="877" font-size="15" text-anchor="middle" class="sub">out = h + MLP(norm(h))</text>
+<path d="M280 328 V426" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M280 490 V530" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M280 594 V634" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M280 682 V722" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M280 786 V826" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M280 410 H95 V658 H140" fill="none" stroke="#6b7280" stroke-width="2" marker-end="url(#gray)"/>
+<path d="M280 702 H485 V858 H420" fill="none" stroke="#6b7280" stroke-width="2" marker-end="url(#gray)"/>
+<rect x="140" y="950" width="280" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="280.0" y="977" font-size="19" text-anchor="middle" class="">Optional Logit Slice</text>
+<text x="280.0" y="1001" font-size="15" text-anchor="middle" class="sub">保留最后 logits_to_keep 个位置</text>
+<rect x="140" y="1050" width="280" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="280.0" y="1077" font-size="19" text-anchor="middle" class="">Final FastRMSNorm</text>
+<text x="280.0" y="1101" font-size="15" text-anchor="middle" class="sub">model.norm</text>
+<rect x="100" y="1150" width="360" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="280.0" y="1177" font-size="19" text-anchor="middle" class="">LM Head → Logits</text>
+<text x="280.0" y="1201" font-size="15" text-anchor="middle" class="sub">独立投影或共享 embedding 权重</text>
+<path d="M280 890 V950" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M280 1014 V1050" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M280 1114 V1150" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<text x="1060" y="132" font-size="21" text-anchor="middle" class="">② Self-Attention 展开：投影 → 缓存 → 注意力</text>
+<rect x="880" y="160" width="360" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1060.0" y="187" font-size="19" text-anchor="middle" class="">Normalized Hidden States</text>
+<text x="1060.0" y="211" font-size="15" text-anchor="middle" class="sub">[B, L, hidden_size]</text>
+<rect x="620" y="280" width="260" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="750.0" y="307" font-size="19" text-anchor="middle" class="">Q Projection</text>
+<text x="750.0" y="331" font-size="15" text-anchor="middle" class="sub">[B, L, Hq, D]</text>
+<rect x="940" y="280" width="260" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1070.0" y="307" font-size="19" text-anchor="middle" class="">K Projection</text>
+<text x="1070.0" y="331" font-size="15" text-anchor="middle" class="sub">[B, L, Hkv, D]</text>
+<rect x="1260" y="280" width="260" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1390.0" y="307" font-size="19" text-anchor="middle" class="">V Projection</text>
+<text x="1390.0" y="331" font-size="15" text-anchor="middle" class="sub">[B, L, Hkv, D]</text>
+<path d="M1060 224 V250 H750 V280" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M1070 250 V280" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M1060 250 H1390 V280" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<rect x="620" y="384" width="260" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="750.0" y="411" font-size="19" text-anchor="middle" class="">Q RMSNorm + RoPE</text>
+<text x="750.0" y="435" font-size="15" text-anchor="middle" class="sub">位置由 offset 决定</text>
+<rect x="940" y="384" width="260" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1070.0" y="411" font-size="19" text-anchor="middle" class="">K RMSNorm + RoPE</text>
+<text x="1070.0" y="435" font-size="15" text-anchor="middle" class="sub">位置由 offset 决定</text>
+<path d="M750 344 V384" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M1070 344 V384" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<rect x="940" y="510" width="580" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1230.0" y="537" font-size="19" text-anchor="middle" class="">Append New K/V</text>
+<text x="1230.0" y="561" font-size="15" text-anchor="middle" class="sub">转置为 [B, Hkv, L, D] → 每请求 cache</text>
+<path d="M1070 448 V510" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M1390 344 V510" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<rect x="940" y="624" width="580" height="80" rx="10" fill="#f0fdf4" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1230.0" y="651" font-size="19" text-anchor="middle" class="">Layer Page Pool</text>
+<text x="1230.0" y="675" font-size="15" text-anchor="middle" class="sub">每层一个池；同层不同请求共享，页表各自独立</text>
+<path d="M1230 574 V624" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#green)" stroke-dasharray="6 4"/>
+<rect x="940" y="754" width="580" height="64" rx="10" fill="#f0fdf4" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1230.0" y="781" font-size="19" text-anchor="middle" class="">gather_dense()</text>
+<text x="1230.0" y="805" font-size="15" text-anchor="middle" class="sub">按 page_ids 读取有效前缀 → 连续历史 K/V</text>
+<path d="M1230 704 V754" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#green)"/>
+<rect x="820" y="882" width="580" height="80" rx="10" fill="#ede9fe" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1110.0" y="909" font-size="19" text-anchor="middle" class="">Dense Attention + Causal Mask</text>
+<text x="1110.0" y="933" font-size="15" text-anchor="middle" class="sub">softmax(QKᵀ / √D + mask) V</text>
+<path d="M750 448 V922 H820" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M1230 818 V882" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#green)"/>
+<rect x="820" y="1012" width="580" height="64" rx="10" fill="#eff6ff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1110.0" y="1039" font-size="19" text-anchor="middle" class="">Merge Heads + Output Projection</text>
+<text x="1110.0" y="1063" font-size="15" text-anchor="middle" class="sub">[B, L, Hq × D] → [B, L, hidden_size]</text>
+<path d="M1110 962 V1012" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<text x="600" y="1140" font-size="21" text-anchor="start" class="">③ MLP: down( SiLU(gate(x)) ⊙ up(x) )</text>
+<text x="600" y="1172" font-size="17" text-anchor="start" class="sub">Q/K/V/O、gate/up/down 默认使用 mx.quantized_matmul。</text>
+<text x="600" y="1200" font-size="17" text-anchor="start" class="sub">Hq = query heads；Hkv = KV heads；L = 新输入长度；S = 历史总长度。</text>
+<path d="M620 1230 H660" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<text x="670" y="1236" font-size="15" text-anchor="start" class="">前向计算</text>
+<path d="M810 1230 H850" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#green)" stroke-dasharray="6 4"/>
+<text x="860" y="1236" font-size="15" text-anchor="start" class="">写页</text>
+<path d="M960 1230 H1000" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#green)"/>
+<text x="1010" y="1236" font-size="15" text-anchor="start" class="">读页 / K/V</text>
+<path d="M1160 1230 H1200" fill="none" stroke="#6b7280" stroke-width="2" marker-end="url(#gray)"/>
+<text x="1210" y="1236" font-size="15" text-anchor="start" class="">残差连接</text>
+</svg>
