@@ -306,3 +306,35 @@ template <typename T>
 
 instantiate_kernel("quantized_matmul_splitk_reduce_f16", quantized_matmul_splitk_reduce, half);
 instantiate_kernel("quantized_matmul_splitk_reduce_bf16", quantized_matmul_splitk_reduce, bfloat16_t);
+
+// Each thread outputs one embedding element; uint32 packs eight W4 codes, low nibble first.
+template <typename T>
+[[kernel]] void quantized_embedding_w4a16_g128(
+    device const uint* indices [[buffer(0)]],
+    device const T* scales [[buffer(1)]],
+    device const T* biases [[buffer(2)]],
+    device const uint* packed [[buffer(3)]],
+    device T* out [[buffer(4)]],
+    constant int& dim [[buffer(5)]],
+    constant int& vocab [[buffer(6)]],
+    constant size_t& count [[buffer(7)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index >= count) return;
+    const uint token = indices[index / dim];
+    // Invalid tokens output NaN instead of reading out of bounds, exposing upstream errors.
+    if (token >= uint(vocab)) {
+        out[index] = T(NAN);
+        return;
+    }
+    const int d = index % dim;
+    const uint pack = packed[size_t(token) * (dim / 8) + d / 8];
+    const uint code = (pack >> (4 * (d % 8))) & 15;
+    const size_t group = size_t(token) * (dim / 128) + d / 128;
+    // Preserve the readable Python path's two low-precision roundings: scale, then bias.
+    // A single float FMA would change BF16 embeddings and the model's numerical behavior.
+    const T product = T(float(code) * float(scales[group]));
+    out[index] = T(float(product) + float(biases[group]));
+}
+
+instantiate_kernel("quantized_embedding_bf16", quantized_embedding_w4a16_g128, bfloat16_t);
+instantiate_kernel("quantized_embedding_f16", quantized_embedding_w4a16_g128, half);

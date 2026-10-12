@@ -47,7 +47,8 @@ class TinyKvCache(ABC):
         mask_length: int | None = None,
         mask: mx.array | str | None = None,
     ) -> "PagedKvMetadata":
-        pass
+        # Week 3 requires explicit paged metadata; passing a dense cache is a programming error.
+        raise ValueError("cache does not support paged runtime metadata")
 
     def rewind(self, n: int):
         pass
@@ -179,6 +180,7 @@ class BatchingKvCache(TinyKvCache):
         # Returning shared pages and a block table avoids dense batch KV copies.
         self.last_batch_bytes = 0
 
+        # Page IDs belong to this layer's pool; another layer's table cannot address it.
         # Preserve slot order: inactive slots have length zero and -1 page IDs.
         rows = []
         for cache in self.kv_caches:

@@ -78,6 +78,8 @@ class Qwen3MultiHeadAttention:
         projection_v = projection_v.transpose(0, 2, 1, 3)
 
         if self.use_paged_attention:
+            # Prefill and decode share the paged boundary: the cache writes and the kernel reads.
+            # Do not route back to dense attention based on L at the model boundary.
             metadata = cache.update_and_fetch_paged(
                 projection_k,
                 projection_v,

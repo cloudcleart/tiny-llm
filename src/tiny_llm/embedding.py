@@ -1,5 +1,7 @@
 import mlx.core as mx
 
+from extensions import tiny_llm_ext
+
 from .basics import linear
 from .quantize import QuantizedWeights, dequantize_weights, quantized_linear
 
@@ -53,6 +55,25 @@ class QuantizedEmbedding:
         # Sampling may return uint32 token IDs, while MLX advanced indexing is
         # consistently supported with signed integer indices.
         indices = x.astype(mx.int32)
+
+        if self.use_custom_kernel:
+            # Fuse token lookup, W4 unpacking, and dequantization into one kernel.
+            # Avoid gathering separate packed-weight, scale, and bias intermediates.
+            if self.weight.group_size != 128:
+                raise ValueError("custom embedding requires group_size=128")
+            if x.dtype not in (mx.int32, mx.uint32):
+                raise ValueError("custom embedding indices must be int32 or uint32")
+            biases = self.weight.biases
+            if biases is None:
+                biases = mx.zeros_like(self.weight.scales)
+            return tiny_llm_ext.quantized_embedding(
+                mx.contiguous(indices),
+                mx.contiguous(self.weight.scales.astype(mx.bfloat16)),
+                mx.contiguous(biases.astype(mx.bfloat16)),
+                mx.contiguous(self.weight.weight),
+                self.weight.group_size,
+                self.weight.bits,
+            )
 
         # Gather packed rows and their group metadata first. This avoids
         # materializing the full dequantized vocabulary table for every lookup.

@@ -11,14 +11,6 @@
 
 namespace tiny_llm_ext {
 
-namespace {
-
-[[noreturn]] void checkpoint_todo(const char *function, const char *checkpoint) {
-    throw std::runtime_error(std::string(function) + " is a starter stub; implement it in " + checkpoint);
-}
-
-}  // namespace
-
 // Week 3, Day 3.
 mx::array paged_cache_update(const mx::array &pages, const mx::array &values, int page_id, int start,
                              mx::StreamOrDevice s) {
@@ -83,18 +75,112 @@ void PagedCacheUpdate::eval_gpu(const std::vector<mx::array> &, std::vector<mx::
 }
 #endif
 
-// Week 3, Day 4. Day 5 replaces the long-query schedule behind this API.
-mx::array paged_attention(const mx::array &, const mx::array &, const mx::array &, const mx::array &, const mx::array &,
-                          float, bool, int, int, mx::StreamOrDevice) {
-    checkpoint_todo("paged_attention", "Week 3, Day 4");
+// Python validates metadata values; this boundary validates buffer layouts.
+mx::array paged_attention(const mx::array &q, const mx::array &keys, const mx::array &values,
+                          const mx::array &table, const mx::array &lengths, float scale,
+                          bool causal, int kv_heads, int heads, mx::StreamOrDevice s) {
+    if ((q.dtype() != mx::float32 && q.dtype() != mx::bfloat16) ||
+        keys.dtype() != q.dtype() || values.dtype() != q.dtype()) {
+        throw std::runtime_error("paged_attention: Q/K/V must share float32 or bfloat16 dtype");
+    }
+    if (q.ndim() != 3 || keys.ndim() != 4 || values.shape() != keys.shape() ||
+        table.ndim() != 2 || lengths.ndim() != 1 || heads <= 0 || kv_heads <= 0 ||
+        heads % kv_heads != 0 || q.shape()[0] <= 0 || q.shape()[0] % heads != 0 ||
+        q.shape()[1] <= 0 || q.shape()[2] <= 0 || keys.shape()[1] != kv_heads ||
+        keys.shape()[2] <= 0 || keys.shape()[3] != q.shape()[2] ||
+        table.shape()[0] != q.shape()[0] / heads || lengths.shape()[0] != table.shape()[0]) {
+        throw std::runtime_error("paged_attention: incompatible query, page, or metadata shapes");
+    }
+    if (table.dtype() != mx::int32 || lengths.dtype() != mx::int32) {
+        throw std::runtime_error("paged_attention: metadata must be int32");
+    }
+    return mx::array(q.shape(), q.dtype(),
+                     std::make_shared<PagedAttention>(to_stream(s), scale, causal, kv_heads, heads),
+                     {q, keys, values, table, lengths});
 }
 
 void PagedAttention::eval_cpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
-    checkpoint_todo("PagedAttention::eval_cpu", "Week 3, Day 4");
+    throw std::runtime_error("paged_attention: the course extension is GPU-only");
 }
 
-void PagedAttention::eval_gpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
-    checkpoint_todo("PagedAttention::eval_gpu", "Week 3, Day 4");
+#ifdef _METAL_
+void PagedAttention::eval_gpu(const std::vector<mx::array> &inputs, std::vector<mx::array> &outputs) {
+    for (const auto &input : inputs) {
+        if (!input.flags().row_contiguous) {
+            throw std::runtime_error("paged_attention: all inputs must be row-contiguous");
+        }
+    }
+    const auto &q = inputs[0];
+    const int length = q.shape()[1], dim = q.shape()[2];
+    // The generic kernels keep at most 64 FP32 components per lane. The
+    // fixed-size prefill staging buffers process wider heads in 128-D chunks.
+    if (dim > 2048) {
+        throw std::runtime_error("paged_attention: head dimension exceeds the 2048-D kernel limit");
+    }
+    auto &out = outputs[0];
+    out.set_data(mx::allocator::malloc(out.nbytes()));
+    auto &device = mx::metal::device(stream().device);
+    const bool short_query = length <= 8;
+    std::string name;
+    if (short_query) {
+        name = q.dtype() == mx::bfloat16 ? "paged_attention_decode_bf16" : "paged_attention_decode_f32";
+        if (q.dtype() == mx::bfloat16 && dim == 128) {
+            // Only this exact shape uses a compile-time D=128 specialization.
+            name += "_d128";
+        } else if (dim > 256) {
+            // Stream 128 output dimensions per pass for wide heads. Keeping
+            // bounded register arrays preserves the required 1024-thread
+            // launch even when a whole-head register allocation is too large.
+            name += "_wide";
+        } else if (dim > 128) {
+            name += "_max256";
+        }
+    } else {
+        // Day 4 prefill stays scalar and paged for both input dtypes. Day 5
+        // can replace this schedule without changing the runtime contract.
+        name = q.dtype() == mx::bfloat16 ? "paged_attention_scalar_bf16" : "paged_attention_scalar_f32";
+    }
+    auto kernel = device.get_kernel(name, device.get_library("tiny_llm_ext"));
+    const int threads = short_query ? 32 * 32 : 16 * 32;
+    if (kernel->maxTotalThreadsPerThreadgroup() < threads) {
+        throw std::runtime_error("paged_attention: device cannot launch the required threadgroup size");
+    }
+    auto &encoder = mx::metal::get_command_encoder(stream());
+    encoder.set_compute_pipeline_state(kernel);
+    for (int i = 0; i < 5; ++i) encoder.set_input_array(inputs[i], i);
+    encoder.set_output_array(out, 5);
+    const int page_size = inputs[1].shape()[2], width = inputs[3].shape()[1];
+    const int causal = is_causal_;
+    encoder.set_bytes(length, 6);
+    encoder.set_bytes(dim, 7);
+    encoder.set_bytes(page_size, 8);
+    encoder.set_bytes(width, 9);
+    encoder.set_bytes(num_heads_, 10);
+    encoder.set_bytes(num_kv_heads_, 11);
+    encoder.set_bytes(scale_, 12);
+    encoder.set_bytes(causal, 13);
+    if (short_query) {
+        // 32 context partitions share one reusable 32x32 transpose tile and
+        // 32 maxima/sums: 4,352 bytes, independent of D and context length.
+        constexpr int groups = 32;
+        encoder.set_threadgroup_memory_length((groups * 32 + 2 * groups) * sizeof(float), 0);
+        encoder.dispatch_threadgroups(MTL::Size(q.shape()[0] * length, 1, 1), MTL::Size(threads, 1, 1));
+    } else {
+        // Sixteen query rows reuse a 32-key tile. Q/K/V staging is bounded
+        // to 128 dimensions per pass; the same K buffer is reused for V.
+        constexpr int query_rows = 16, key_rows = 32, dimensions = 128;
+        const size_t scratch_bytes =
+            (query_rows * dimensions + key_rows * dimensions + query_rows * key_rows) * sizeof(float) +
+            key_rows * sizeof(int);
+        encoder.set_threadgroup_memory_length(scratch_bytes, 0);
+        encoder.dispatch_threadgroups(MTL::Size(q.shape()[0], (length + query_rows - 1) / query_rows, 1),
+                                      MTL::Size(threads, 1, 1));
+    }
 }
+#else
+void PagedAttention::eval_gpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
+    throw std::runtime_error("paged_attention: Metal unavailable");
+}
+#endif
 
 }  // namespace tiny_llm_ext

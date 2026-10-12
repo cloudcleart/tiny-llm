@@ -6,6 +6,8 @@ from .kv_cache import BatchingKvCache
 
 
 def _step(model, y, offsets, kv_cache):
+    # Each layer cache builds its page table after appending the current K/V.
+    # Preserve request slot order without packing variable-length requests into dense K/V.
     logits = model(y, offsets, kv_cache, logits_to_keep=1)
     logits = logits[:, -1, :]
     logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
@@ -73,6 +75,10 @@ class Request:
             return
         self.next_token = token
         self.detokenizer.add_token(token)
+        # The newly generated token counts toward total length even before it enters the KV cache.
+        # Stop at the limit to avoid an extra decode whose prediction would be discarded.
+        if self.offset + 1 >= self.max_seq_len:
+            self.is_done = True
 
     def text(self):
         if self.is_done and hasattr(self.detokenizer, "finalize"):
@@ -139,37 +145,77 @@ def batch_generate(
     progress_cnt = 0
     start_time = datetime.now()
 
-    while True:
-        if not prompts and pending_prefill_request is None and not any(decode_requests):
-            break
-        # prefill until no idle slots
-        if len(prompts) > 0 and pending_prefill_request is None:
-            prompt = prompts.pop(0)
-            pending_prefill_request = Request(
-                model, tokenizer, prompt, prefill_step, next_request_idx, max_seq_len
-            )
-            next_request_idx += 1
+    try:
+        while True:
+            if (
+                not prompts
+                and pending_prefill_request is None
+                and not any(decode_requests)
+            ):
+                break
+            # prefill until no idle slots
+            if len(prompts) > 0 and pending_prefill_request is None:
+                prompt = prompts.pop(0)
+                pending_prefill_request = Request(
+                    model,
+                    tokenizer,
+                    prompt,
+                    prefill_step,
+                    next_request_idx,
+                    max_seq_len,
+                )
+                next_request_idx += 1
 
-        # In every iteration, we do a prefill first
-        if pending_prefill_request is not None:
-            made_progress = False
-            if not pending_prefill_request.is_prefill_done:
-                pending_prefill_request.try_prefill()
-                made_progress = True
-            if pending_prefill_request.is_prefill_done:
-                request = pending_prefill_request
-                if request.is_done:
-                    result.append((request.prompt_idx, request.text()))
-                    for cache in request.kv_cache:
-                        cache.release()
-                    pending_prefill_request = None
-                elif None in decode_requests:
-                    slot = decode_requests.index(None)
-                    for cache, request_cache in zip(kv_cache, request.kv_cache):
-                        cache.add_request(request_cache, slot)
-                    decode_requests[slot] = request
-                    pending_prefill_request = None
-            if made_progress:
+            # In every iteration, we do a prefill first
+            if pending_prefill_request is not None:
+                made_progress = False
+                if not pending_prefill_request.is_prefill_done:
+                    pending_prefill_request.try_prefill()
+                    made_progress = True
+                if pending_prefill_request.is_prefill_done:
+                    request = pending_prefill_request
+                    if request.is_done:
+                        result.append((request.prompt_idx, request.text()))
+                        for cache in request.kv_cache:
+                            cache.release()
+                        pending_prefill_request = None
+                    elif None in decode_requests:
+                        slot = decode_requests.index(None)
+                        for cache, request_cache in zip(kv_cache, request.kv_cache):
+                            cache.add_request(request_cache, slot)
+                        decode_requests[slot] = request
+                        pending_prefill_request = None
+                if made_progress:
+                    _print_progress(
+                        decode_requests,
+                        pending_prefill_request,
+                        len(prompts),
+                        progress_cnt,
+                        start_time,
+                    )
+                    progress_cnt += 1
+
+            # After the prefill request moves forward one step, we do the decode
+            if any(req is not None for req in decode_requests):
+                next_tokens = []
+                offsets = []
+                for request in decode_requests:
+                    next_tokens.append(0 if request is None else request.next_token)
+                    offsets.append(0 if request is None else request.offset)
+                next_tokens = mx.array(next_tokens, dtype=mx.int32)
+                next_tokens = _step(
+                    model, next_tokens.reshape(-1, 1), offsets, kv_cache
+                )
+                for i in range(batch_size):
+                    request = decode_requests[i]
+                    if request is None:
+                        continue
+                    request.decode_done(next_tokens[i].item())
+                    if request.is_done:
+                        result.append((request.prompt_idx, request.text()))
+                        for cache in kv_cache:
+                            cache.remove_request(i)
+                        decode_requests[i] = None
                 _print_progress(
                     decode_requests,
                     pending_prefill_request,
@@ -178,32 +224,13 @@ def batch_generate(
                     start_time,
                 )
                 progress_cnt += 1
-
-        # After the prefill request moves forward one step, we do the decode
-        if any(req is not None for req in decode_requests):
-            next_tokens = []
-            offsets = []
-            for request in decode_requests:
-                next_tokens.append(0 if request is None else request.next_token)
-                offsets.append(0 if request is None else request.offset)
-            next_tokens = mx.array(next_tokens, dtype=mx.int32)
-            next_tokens = _step(model, next_tokens.reshape(-1, 1), offsets, kv_cache)
-            for i in range(batch_size):
-                request = decode_requests[i]
-                if request is None:
-                    continue
-                request.decode_done(next_tokens[i].item())
-                if request.is_done:
-                    result.append((request.prompt_idx, request.text()))
-                    for cache in kv_cache:
-                        cache.remove_request(i)
-                    decode_requests[i] = None
-            _print_progress(
-                decode_requests,
-                pending_prefill_request,
-                len(prompts),
-                progress_cnt,
-                start_time,
-            )
-            progress_cnt += 1
+    finally:
+        # Release every layer on success or failure; pending prefill may already own pages.
+        # remove_request/release are idempotent, so completed requests are not freed twice.
+        if pending_prefill_request is not None:
+            for cache in pending_prefill_request.kv_cache:
+                cache.release()
+        for layer_cache in kv_cache:
+            for slot in range(batch_size):
+                layer_cache.remove_request(slot)
     return result

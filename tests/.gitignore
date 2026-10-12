@@ -3,3 +3,4 @@ test_*.py
 !test_week_2_day_5_task_2.py
 !test_week_3_day_2_task_2.py
 !test_week_3_day_2_task_3.py
+!test_week_3_day_4_edges.py

@@ -220,86 +220,70 @@ def paged_attention(
     scale: float | None = None,
     mask: mx.array | str | None = None,
 ) -> mx.array:
+    """Compute attention directly from physical pages, preserving query shape and dtype.
+
+    query: [B, H_q, L, D]; K/V page storage: [P, H_kv, page_size, D].
+    block_table[b, j] maps logical page j of request b to a physical page ID.
+    context_lens[b] is the total length after appending the current L tokens.
+    mask supports only None or "causal", without constructing a dense mask.
     """
-    Args:
-        query: Query vectors with shape (..., H_q, L, D).
-        key: Key vectors with shape (..., H, S, D).
-        value: Value vectors with shape (..., H, S, D).
-        scale: Optional multiplier for attention scores. Defaults to 1 / sqrt(D).
-        mask: Optional additive mask with shape broadcastable to (..., H_q, L, S),
-            or the string "causal".
+    if not isinstance(page_size, int) or isinstance(page_size, bool) or page_size <= 0:
+        raise ValueError("page_size must be a positive integer")
+    if query.ndim != 4 or key_pages.ndim != 4 or value_pages.ndim != 4:
+        raise ValueError("query and page storage must be 4D")
+    B, H_q, L, D = query.shape
+    P, H_kv, stored_page_size, D_k = key_pages.shape
+    if min(B, H_q, L, D, H_kv) <= 0:
+        raise ValueError("attention dimensions must be positive")
+    if (
+        key_pages.shape != value_pages.shape
+        or D != D_k
+        or page_size != stored_page_size
+    ):
+        raise ValueError("incompatible query and page storage shapes")
+    if H_q % H_kv:
+        raise ValueError("query head count must be divisible by KV head count")
+    if query.dtype not in (mx.float32, mx.bfloat16) or not (
+        query.dtype == key_pages.dtype == value_pages.dtype
+    ):
+        raise ValueError("query and pages must have the same float32 or bfloat16 dtype")
+    if block_table.ndim != 2 or block_table.shape[0] != B or context_lens.shape != (B,):
+        raise ValueError("metadata must have shapes [B, max_pages] and [B]")
+    if block_table.dtype != mx.int32 or context_lens.dtype != mx.int32:
+        raise ValueError("block_table and context_lens must be int32")
+    if mask is not None and not (isinstance(mask, str) and mask == "causal"):
+        raise ValueError('paged attention supports only None or "causal" masks')
 
-    Returns:
-        Attention output with shape (..., H_q, L, D).
-    """
-    assert query.ndim >= 3
-    assert key.ndim == query.ndim
-    assert value.ndim == query.ndim
-    assert key.shape == value.shape
+    # Validate the small metadata arrays before dispatch to prevent out-of-bounds page reads.
+    # tolist synchronizes metadata only; it neither transfers nor reconstructs K/V.
+    # Validate page tables before L so other argument errors do not hide corrupt metadata.
+    lengths = context_lens.tolist()
+    for length, row in zip(lengths, block_table.tolist()):
+        if length < 0:
+            raise ValueError("context lengths must be nonnegative")
+        live_pages = (length + page_size - 1) // page_size
+        if live_pages > len(row):
+            raise ValueError("context length is not covered by block_table")
+        live = row[:live_pages]
+        if any(page < 0 or page >= P for page in live):
+            raise ValueError("live page is outside physical page storage")
+        if len(set(live)) != len(live):
+            raise ValueError("live pages are aliased within a request")
+        if any(page != -1 for page in row[live_pages:]):
+            raise ValueError("unused block_table entries must use the -1 sentinel")
+    if any(0 < length < L for length in lengths):
+        raise ValueError("context length must be zero or at least query length")
 
-    batch_shape = query.shape[:-3]
-    H_q, L, D = query.shape[-3:]
-    H, S, D_k = key.shape[-3:]
-
-    assert key.shape[:-3] == batch_shape
-    assert D == D_k
-    assert H_q % H == 0
-
-    # The extension binding takes a Python float, not an MLX scalar.
-    factor = (
-        float(mx.rsqrt(mx.array(D, dtype=mx.float32)))
-        if scale is None
-        else float(scale)
-    )
-    original_shape = query.shape
-    batch_size = 1
-    for dim in batch_shape:
-        batch_size *= dim
-
-    is_causal = isinstance(mask, str) and mask == "causal"
-    if isinstance(mask, str) and not is_causal:
-        raise ValueError(f"Unknown attention mask: {mask}")
-
-    # The extension always receives a concrete additive mask. The is_causal flag
-    # lets the CPU/GPU kernels take their block-level causal fast path.
-    if is_causal:
-        mask = causal_mask(L, S, mx.float32)
-    elif mask is None:
-        mask = mx.zeros((*batch_shape, H_q, L, S), dtype=mx.float32)
-
-    # Flatten batch and query heads to match the extension API:
-    # Q/M/O: (B * H_q, L, D/S), K/V: (B * H, S, D).
-    mask = mx.broadcast_to(mask, (*batch_shape, H_q, L, S))
-    mask = mask.reshape(batch_size * H_q, L, S).astype(mx.float32)
-
-    # The C++ primitive assumes row-contiguous buffers and float32 masks.
-    query = mx.contiguous(query.reshape(batch_size * H_q, L, D))
-    key = mx.contiguous(key.reshape(batch_size * H, S, D))
-    value = mx.contiguous(value.reshape(batch_size * H, S, D))
-    mask = mx.contiguous(mask)
-
-    if tiny_llm_ext is not None and hasattr(tiny_llm_ext, "flash_attention"):
-        output = tiny_llm_ext.flash_attention(
-            query,
-            key,
-            value,
-            mask,
-            factor,
-            is_causal,
-            H,
-            H_q,
-        )
-        return output.reshape(original_shape)
-
-    # Keep task 1 testable before the custom primitive is implemented.
-    query = query.reshape(*batch_shape, H_q, L, D)
-    key = key.reshape(*batch_shape, H, S, D)
-    value = value.reshape(*batch_shape, H, S, D)
-    mask = mask.reshape(*batch_shape, H_q, L, S)
-    return mx.fast.scaled_dot_product_attention(
-        q=query,
-        k=key,
-        v=value,
-        scale=factor,
-        mask=mask,
-    )
+    # Transposed Q and pool slices may be views; the extension requires contiguous buffers.
+    # Normalize physical buffer layouts without gathering logical K/V for each request.
+    return tiny_llm_ext.paged_attention(
+        mx.contiguous(query.reshape(B * H_q, L, D)),
+        mx.contiguous(key_pages),
+        mx.contiguous(value_pages),
+        mx.contiguous(block_table),
+        mx.contiguous(context_lens),
+        D**-0.5 if scale is None else float(scale),
+        mask == "causal",
+        H_kv,
+        H_q,
+    ).reshape(query.shape)

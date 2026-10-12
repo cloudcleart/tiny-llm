@@ -13,14 +13,6 @@
 
 namespace tiny_llm_ext {
 
-namespace {
-
-[[noreturn]] void checkpoint_todo(const char *function, const char *checkpoint) {
-    throw std::runtime_error(std::string(function) + " is a starter stub; implement it in " + checkpoint);
-}
-
-}  // namespace
-
 // Week 2, Day 3. Days 6 and 7 extend the dispatch policy behind this API.
 mx::array quantized_matmul(const mx::array &scales, const mx::array &biases, int group_size, int bits,
                            const mx::array &a, const mx::array &b, bool transpose_b, bool use_simdgroup,
@@ -208,18 +200,55 @@ void QuantizedMatmul::eval_gpu(const std::vector<mx::array> &inputs, std::vector
                                   MTL::Size(rows_per_threadgroup, columns_per_threadgroup, 1));
 }
 
-// Week 3, Day 4. The earlier Week 2 checkpoints keep the readable row lookup.
-mx::array quantized_embedding(const mx::array &, const mx::array &, const mx::array &, const mx::array &, int, int,
-                              mx::StreamOrDevice) {
-    checkpoint_todo("quantized_embedding", "Week 3, Day 4");
+// Week 3: lookup and unpack only the requested token rows in one dispatch.
+mx::array quantized_embedding(const mx::array &indices, const mx::array &scales,
+                              const mx::array &biases, const mx::array &weight,
+                              int group_size, int bits, mx::StreamOrDevice s) {
+    if ((indices.dtype() != mx::int32 && indices.dtype() != mx::uint32) || weight.dtype() != mx::uint32) {
+        throw std::runtime_error("quantized_embedding: expected integer indices and uint32 packed weights");
+    }
+    if ((scales.dtype() != mx::float16 && scales.dtype() != mx::bfloat16) || biases.dtype() != scales.dtype()) {
+        throw std::runtime_error("quantized_embedding: scales/biases must share float16 or bfloat16 dtype");
+    }
+    if (bits != 4 || group_size != 128 || weight.ndim() != 2 || scales.ndim() != 2 ||
+        biases.shape() != scales.shape() || weight.shape()[0] <= 0 || weight.shape()[1] <= 0 ||
+        weight.shape()[1] % 16 != 0 || scales.shape()[0] != weight.shape()[0] ||
+        scales.shape()[1] != weight.shape()[1] / 16) {
+        throw std::runtime_error("quantized_embedding: incompatible W4 group-128 shapes");
+    }
+    auto shape = indices.shape();
+    shape.push_back(weight.shape()[1] * 8);
+    return mx::array(shape, scales.dtype(), std::make_shared<QuantizedEmbedding>(to_stream(s)),
+                     {indices, scales, biases, weight});
 }
 
 void QuantizedEmbedding::eval_cpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
-    checkpoint_todo("QuantizedEmbedding::eval_cpu", "Week 3, Day 4");
+    throw std::runtime_error("quantized_embedding: the course extension is GPU-only");
 }
 
-void QuantizedEmbedding::eval_gpu(const std::vector<mx::array> &, std::vector<mx::array> &) {
-    checkpoint_todo("QuantizedEmbedding::eval_gpu", "Week 3, Day 4");
+void QuantizedEmbedding::eval_gpu(const std::vector<mx::array> &inputs, std::vector<mx::array> &outputs) {
+    for (const auto &input : inputs) {
+        if (!input.flags().row_contiguous) {
+            throw std::runtime_error("quantized_embedding: inputs must be row-contiguous");
+        }
+    }
+    auto &out = outputs[0];
+    out.set_data(mx::allocator::malloc(out.nbytes()));
+    if (out.size() == 0) return;
+    auto &device = mx::metal::device(stream().device);
+    const char *name = out.dtype() == mx::bfloat16 ? "quantized_embedding_bf16" : "quantized_embedding_f16";
+    auto kernel = device.get_kernel(name, device.get_library("tiny_llm_ext"));
+    auto &encoder = mx::metal::get_command_encoder(stream());
+    encoder.set_compute_pipeline_state(kernel);
+    for (int i = 0; i < 4; ++i) encoder.set_input_array(inputs[i], i);
+    encoder.set_output_array(out, 4);
+    const int dim = inputs[3].shape()[1] * 8, vocab = inputs[3].shape()[0];
+    const size_t count = out.size();
+    encoder.set_bytes(dim, 5);
+    encoder.set_bytes(vocab, 6);
+    encoder.set_bytes(count, 7);
+    const int threads = std::min<int>(256, kernel->maxTotalThreadsPerThreadgroup());
+    encoder.dispatch_threads(MTL::Size(count, 1, 1), MTL::Size(threads, 1, 1));
 }
 
 }  // namespace tiny_llm_ext

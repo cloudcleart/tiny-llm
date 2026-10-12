@@ -408,6 +408,7 @@ class TinyKvPagedCache(TinyKvCache):
         return self._cached_block_table
 
     def context_lens(self) -> mx.array:
+        # Include the newly appended K/V so attention can infer absolute query positions.
         return mx.array([self.offset], dtype=mx.int32)
 
     def paged_metadata(
@@ -433,6 +434,8 @@ class TinyKvPagedCache(TinyKvCache):
         mask_length: int | None = None,
         mask: mx.array | str | None = None,
     ) -> PagedKvMetadata:
+        # Append before fetching metadata: writes may allocate pages or grow the pool.
+        # The returned buffers, page table, and lengths must describe the same updated state.
         self._append_chunk(key, value)
         return self.paged_metadata(mask=mask)
 
