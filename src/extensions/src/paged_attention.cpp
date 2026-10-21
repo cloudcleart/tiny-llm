@@ -120,7 +120,10 @@ void PagedAttention::eval_gpu(const std::vector<mx::array> &inputs, std::vector<
     auto &out = outputs[0];
     out.set_data(mx::allocator::malloc(out.nbytes()));
     auto &device = mx::metal::device(stream().device);
+    // Route by this call's query length, not the amount of cached context.
+    // The matrix kernel specializes both its BF16 inputs and its D=128 tiles.
     const bool short_query = length <= 8;
+    const bool tiled_prefill = !short_query && q.dtype() == mx::bfloat16 && dim == 128;
     std::string name;
     if (short_query) {
         name = q.dtype() == mx::bfloat16 ? "paged_attention_decode_bf16" : "paged_attention_decode_f32";
@@ -135,13 +138,14 @@ void PagedAttention::eval_gpu(const std::vector<mx::array> &inputs, std::vector<
         } else if (dim > 128) {
             name += "_max256";
         }
+    } else if (tiled_prefill) {
+        name = "paged_attention_mma_bf16_d128";
     } else {
-        // Day 4 prefill stays scalar and paged for both input dtypes. Day 5
-        // can replace this schedule without changing the runtime contract.
+        // Keep the Day 4 schedule for other dtypes and head dimensions.
         name = q.dtype() == mx::bfloat16 ? "paged_attention_scalar_bf16" : "paged_attention_scalar_f32";
     }
     auto kernel = device.get_kernel(name, device.get_library("tiny_llm_ext"));
-    const int threads = short_query ? 32 * 32 : 16 * 32;
+    const int threads = short_query ? 32 * 32 : (tiled_prefill ? 8 * 32 : 16 * 32);
     if (kernel->maxTotalThreadsPerThreadgroup() < threads) {
         throw std::runtime_error("paged_attention: device cannot launch the required threadgroup size");
     }
@@ -165,6 +169,13 @@ void PagedAttention::eval_gpu(const std::vector<mx::array> &inputs, std::vector<
         constexpr int groups = 32;
         encoder.set_threadgroup_memory_length((groups * 32 + 2 * groups) * sizeof(float), 0);
         encoder.dispatch_threadgroups(MTL::Size(q.shape()[0] * length, 1, 1), MTL::Size(threads, 1, 1));
+    } else if (tiled_prefill) {
+        // Eight SIMD groups own eight query rows each. The kernel declares
+        // its BF16 Q/K/V staging statically; it needs no dynamic scratch.
+        // Grid x selects a flattened (batch, query head); grid y selects a
+        // 64-row Q tile. Each threadgroup streams the corresponding KV head.
+        encoder.dispatch_threadgroups(MTL::Size(q.shape()[0], (length + 63) / 64, 1),
+                                      MTL::Size(threads, 1, 1));
     } else {
         // Sixteen query rows reuse a 32-key tile. Q/K/V staging is bounded
         // to 128 dimensions per pass; the same K buffer is reused for V.

@@ -1,5 +1,8 @@
 #include <metal_stdlib>
+#include <metal_simdgroup>
+#include <metal_simdgroup_matrix>
 #include "mlx/backend/metal/kernels/utils.h"
+#include "cooperative_matrix.h"
 
 using namespace metal;
 
@@ -406,3 +409,256 @@ template <typename T>
 
 instantiate_kernel("paged_attention_scalar_f32", paged_attention_scalar, float);
 instantiate_kernel("paged_attention_scalar_bf16", paged_attention_scalar, bfloat16_t);
+
+namespace {
+
+// A row of an 8x8 SIMD matrix is distributed over lanes differing by 1 and
+// 8. Each lane owns two adjacent columns, as in course_matrix_coordinate.
+// Explicitly unroll fixed fragment loops to keep matrix indices constant and
+// enable register allocation; the runtime-length K/V loop stays rolled.
+template <int FRAGMENTS>
+inline float paged_row_max(thread const simdgroup_matrix<float, 8, 8>* tiles) {
+    float result = -INFINITY;
+    #pragma clang loop unroll(full)
+    for (int i = 0; i < FRAGMENTS; ++i) {
+        const auto elements = tiles[i].thread_elements();
+        result = max(result, max(elements[0], elements[1]));
+    }
+    result = max(result, simd_shuffle_xor(result, ushort(1)));
+    return max(result, simd_shuffle_xor(result, ushort(8)));
+}
+
+template <int FRAGMENTS>
+inline float paged_row_sum(thread const simdgroup_matrix<float, 8, 8>* tiles) {
+    float result = 0.0f;
+    #pragma clang loop unroll(full)
+    for (int i = 0; i < FRAGMENTS; ++i) {
+        const auto elements = tiles[i].thread_elements();
+        result += elements[0] + elements[1];
+    }
+    result += simd_shuffle_xor(result, ushort(1));
+    return result + simd_shuffle_xor(result, ushort(8));
+}
+
+}  // namespace
+
+// Day 5: one 64-row query tile stays in threadgroup memory while 32-row
+// page-backed K/V tiles stream through. Each SIMD group owns eight query rows.
+// The paging and output layouts remain compatible with the Day 4 kernels.
+[[kernel, max_total_threads_per_threadgroup(256)]] void paged_attention_mma_bf16_d128(
+    device const bfloat* q [[buffer(0)]],
+    device const bfloat* keys [[buffer(1)]],
+    device const bfloat* values [[buffer(2)]],
+    device const int* table [[buffer(3)]],
+    device const int* lengths [[buffer(4)]],
+    device bfloat* out [[buffer(5)]],
+    constant int& L [[buffer(6)]],
+    constant int& D [[buffer(7)]],
+    constant int& page_size [[buffer(8)]],
+    constant int& table_width [[buffer(9)]],
+    constant int& heads [[buffer(10)]],
+    constant int& kv_heads [[buffer(11)]],
+    constant float& scale [[buffer(12)]],
+    constant int& causal [[buffer(13)]],
+    uint2 block [[threadgroup_position_in_grid]],
+    ushort lane [[thread_index_in_simdgroup]],
+    ushort group [[simdgroup_index_in_threadgroup]]) {
+    constexpr int BQ = 64, BK = 32, BD = 128, MMA = 8, THREADS = 256;
+    constexpr int LDQ = BD + 2, LDK = BK + 2, LDV = BD + 2;
+    constexpr int SCORE_FRAGMENTS = BK / MMA, OUTPUT_FRAGMENTS = BD / MMA;
+    using QLoader = tiny_llm::CooperativeTileLoader<bfloat, BQ, BD, LDQ, THREADS>;
+    using KLoader = tiny_llm::CooperativeTileLoader<bfloat, BK, BD, LDK, THREADS, true>;
+    using VLoader = tiny_llm::CooperativeTileLoader<bfloat, BK, BD, LDV, THREADS>;
+    // The 256 threads stage 32 BF16 Q elements or 16 BF16 K/V elements each.
+    // Padded shared-memory strides do not add device-memory reads.
+
+    const int head_row = block.x;
+    const int batch = head_row / heads;
+    const int kv_head = (head_row % heads) / (heads / kv_heads);
+    const int query_start = block.y * BQ;
+    const int thread_idx = group * 32 + lane;
+    const ushort2 coord = tiny_llm::course_matrix_coordinate(lane);
+    const int query_pos = query_start + group * MMA + coord.y;
+    // Tail rows must reach every barrier; mask their scores and stores instead
+    // of returning early from the threadgroup.
+    const bool query_valid = query_pos < L;
+    const int context = lengths[batch];
+    const size_t q_base = size_t(head_row) * L * D;
+    // Store logits and running_max in base-2 units so exp2 implements softmax.
+    const float scale_log2 = scale * 1.4426950408889634f;
+
+    threadgroup bfloat q_tile[BQ * LDQ];
+    // K is transposed to [D, BK]; V is [BK, D]. Reuse the larger allocation.
+    threadgroup bfloat kv_tile[BD * LDK];
+    threadgroup int physical_pages[BK];
+    // Stage Q once per threadgroup; shared-to-fragment reads repeat per K tile.
+    QLoader::load(q + q_base + size_t(query_start) * BD, BD, q_tile,
+                  thread_idx, min(BQ, L - query_start), BD);
+    // Publish the Q tile before any SIMD group reads its matrix fragments.
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    simdgroup_matrix<float, MMA, MMA> output[OUTPUT_FRAGMENTS];
+    #pragma clang loop unroll(full)
+    for (int i = 0; i < OUTPUT_FRAGMENTS; ++i) output[i].thread_elements() = 0.0f;
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    const int last_query = min(query_start + BQ, L) - 1;
+    // Load through the last valid row's causal bound. Earlier rows apply their
+    // own masks below, allowing all SIMD groups to share the same K/V tiles.
+    const int visible = causal ? clamp(context - L + last_query + 1, 0, context) : context;
+
+    for (int tile_start = 0; tile_start < visible; tile_start += BK) {
+        const int first_slot = tile_start % page_size;
+        // Test the nominal tile span; a partial tail can also use this path.
+        const bool one_page = first_slot + BK <= page_size;
+        const int live_keys = min(BK, visible - tile_start);
+        if (one_page) {
+            if (thread_idx == 0) {
+                physical_pages[0] = table[batch * table_width + tile_start / page_size];
+            }
+        } else if (thread_idx < BK) {
+            physical_pages[thread_idx] = thread_idx < live_keys
+                ? table[batch * table_width + (tile_start + thread_idx) / page_size]
+                : -1;
+        }
+        // Share page IDs with the threads that stage K and, later, V.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (one_page) {
+            const size_t base =
+                ((size_t(physical_pages[0]) * kv_heads + kv_head) * page_size + first_slot) * BD;
+            KLoader::load(keys + base, BD, kv_tile, thread_idx, live_keys, BD);
+        } else {
+            // Keep each thread's 16 source dimensions contiguous within one
+            // key, even across pages. Only the shared-memory store transposes K.
+            constexpr int CHUNK = BK * BD / THREADS;
+            const int key = thread_idx * CHUNK / BD;
+            const int dim = thread_idx * CHUNK % BD;
+            const int page = physical_pages[key];
+            #pragma clang loop unroll(full)
+            for (int i = 0; i < CHUNK; ++i) {
+                bfloat value = bfloat(0.0f);
+                if (key < live_keys && page >= 0) {
+                    const int slot = (tile_start + key) % page_size;
+                    const size_t base = ((size_t(page) * kv_heads + kv_head) * page_size + slot) * BD;
+                    value = keys[base + dim + i];
+                }
+                kv_tile[(dim + i) * LDK + key] = value;
+            }
+        }
+        // All K stores must be visible before any group starts QK^T.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Scores stay in FP32 matrix fragments, then become unnormalized
+        // softmax weights in place; no full attention matrix is materialized.
+        simdgroup_matrix<float, MMA, MMA> scores[SCORE_FRAGMENTS];
+        #pragma clang loop unroll(full)
+        for (int i = 0; i < SCORE_FRAGMENTS; ++i) scores[i].thread_elements() = 0.0f;
+        // Full unrolling keeps the fixed-size matrix-fragment indices constant.
+        #pragma clang loop unroll(full)
+        for (int dim = 0; dim < BD; dim += MMA) {
+            simdgroup_matrix<bfloat, MMA, MMA> q_fragment;
+            tiny_llm::course_load_matrix(q_fragment, q_tile + group * MMA * LDQ + dim, LDQ, lane);
+            #pragma clang loop unroll(full)
+            for (int i = 0; i < SCORE_FRAGMENTS; ++i) {
+                simdgroup_matrix<bfloat, MMA, MMA> k_fragment;
+                tiny_llm::course_load_matrix(k_fragment, kv_tile + dim * LDK + i * MMA, LDK, lane);
+                simdgroup_multiply_accumulate(scores[i], q_fragment, k_fragment, scores[i]);
+            }
+        }
+        // Query positions are relative to this call; context - L converts them
+        // to absolute positions in the cached sequence for causal masking.
+        #pragma clang loop unroll(full)
+        for (int i = 0; i < SCORE_FRAGMENTS; ++i) {
+            thread auto& elements = scores[i].thread_elements();
+            #pragma clang loop unroll(full)
+            for (int j = 0; j < 2; ++j) {
+                const int key = tile_start + i * MMA + coord.x + j;
+                const bool valid = query_valid && key < context &&
+                    (!causal || key <= query_pos + context - L);
+                elements[j] = valid ? elements[j] * scale_log2 : -INFINITY;
+            }
+        }
+
+        const float next_max = max(running_max, paged_row_max<SCORE_FRAGMENTS>(scores));
+        const bool has_scores = next_max != -INFINITY;
+        // Change both the old denominator and output accumulator to the new
+        // maximum's scale. Guard empty rows to avoid evaluating -inf - -inf.
+        const float old_scale = running_max != -INFINITY && has_scores
+            ? fast::exp2(running_max - next_max) : 0.0f;
+        #pragma clang loop unroll(full)
+        for (int i = 0; i < SCORE_FRAGMENTS; ++i) {
+            thread auto& elements = scores[i].thread_elements();
+            #pragma clang loop unroll(full)
+            for (int j = 0; j < 2; ++j) {
+                elements[j] = elements[j] != -INFINITY && has_scores
+                    ? fast::exp2(elements[j] - next_max) : 0.0f;
+            }
+        }
+        running_max = next_max;
+        running_sum = old_scale * running_sum + paged_row_sum<SCORE_FRAGMENTS>(scores);
+        #pragma clang loop unroll(full)
+        for (int i = 0; i < OUTPUT_FRAGMENTS; ++i) output[i].thread_elements() *= old_scale;
+        // The denominator uses FP32 weights; only the PV matrix input is rounded
+        // to BF16. Output accumulation remains FP32 across all K/V tiles.
+        simdgroup_matrix<bfloat, MMA, MMA> probabilities[SCORE_FRAGMENTS];
+        #pragma clang loop unroll(full)
+        for (int i = 0; i < SCORE_FRAGMENTS; ++i) {
+            const auto elements = scores[i].thread_elements();
+            probabilities[i].thread_elements()[0] = bfloat(elements[0]);
+            probabilities[i].thread_elements()[1] = bfloat(elements[1]);
+        }
+
+        // All groups finish reading K before its buffer is reused for V.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (one_page) {
+            const size_t base =
+                ((size_t(physical_pages[0]) * kv_heads + kv_head) * page_size + first_slot) * BD;
+            VLoader::load(values + base, BD, kv_tile, thread_idx, live_keys, BD);
+        } else {
+            constexpr int CHUNK = BK * BD / THREADS;
+            const int key = thread_idx * CHUNK / BD;
+            const int dim = thread_idx * CHUNK % BD;
+            const int page = physical_pages[key];
+            #pragma clang loop unroll(full)
+            for (int i = 0; i < CHUNK; ++i) {
+                bfloat value = bfloat(0.0f);
+                if (key < live_keys && page >= 0) {
+                    const int slot = (tile_start + key) % page_size;
+                    const size_t base = ((size_t(page) * kv_heads + kv_head) * page_size + slot) * BD;
+                    value = values[base + dim + i];
+                }
+                kv_tile[key * LDV + dim + i] = value;
+            }
+        }
+        // Publish V before the SIMD groups read it for PV.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        #pragma clang loop unroll(full)
+        for (int i = 0; i < OUTPUT_FRAGMENTS; ++i) {
+            #pragma clang loop unroll(full)
+            for (int j = 0; j < SCORE_FRAGMENTS; ++j) {
+                simdgroup_matrix<bfloat, MMA, MMA> v_fragment;
+                tiny_llm::course_load_matrix(v_fragment, kv_tile + j * MMA * LDV + i * MMA, LDV, lane);
+                simdgroup_multiply_accumulate(output[i], probabilities[j], v_fragment, output[i]);
+            }
+        }
+        // Finish every V read before the next iteration overwrites the shared
+        // K/V buffer or its page IDs.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Normalize and write each output once. Empty batch slots produce zero,
+    // and padded query rows never store.
+    if (query_valid) {
+        #pragma clang loop unroll(full)
+        for (int i = 0; i < OUTPUT_FRAGMENTS; ++i) {
+            const auto elements = output[i].thread_elements();
+            #pragma clang loop unroll(full)
+            for (int j = 0; j < 2; ++j) {
+                const int dim = i * MMA + coord.x + j;
+                out[q_base + size_t(query_pos) * BD + dim] =
+                    bfloat(running_sum > 0.0f ? elements[j] / running_sum : 0.0f);
+            }
+        }
+    }
+}

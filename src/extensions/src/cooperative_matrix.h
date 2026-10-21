@@ -20,8 +20,10 @@ struct CooperativeTileLoader {
         uint8_t values[16];
     };
 
+    // The caller must synchronize before other threads consume the staged tile.
     static METAL_FUNC void load(device const T *source, int source_stride, threadgroup T *destination,
                                 uint thread_index, int valid_rows = ROWS, int valid_columns = COLS) {
+        // Each chunk stays within one source row, as enforced by static_assert.
         constexpr int chunk = ROWS * COLS / THREADS;
         const int row = thread_index * chunk / COLS;
         const int column = thread_index * chunk % COLS;
@@ -42,6 +44,8 @@ struct CooperativeTileLoader {
                 }
             }
         } else {
+            // Guard device reads and initialize invalid logical tile entries to
+            // zero so all threads can still participate in subsequent barriers.
 #pragma unroll
             for (int i = 0; i < chunk; ++i) {
                 const int target = TRANSPOSE_DESTINATION
@@ -54,12 +58,16 @@ struct CooperativeTileLoader {
     }
 };
 
+// An 8x8 fragment is distributed as two adjacent columns per lane. Four lanes
+// share each row; XOR 1 and XOR 8 change the column owner without changing y.
 METAL_FUNC ushort2 course_matrix_coordinate(ushort lane) {
     return ushort2(
         (lane & 1) * 2 + (lane & 8) / 2,
         (lane & 7) / 2 + (lane & 16) / 4);
 }
 
+// Read shared memory into the two matrix-fragment elements owned by this lane.
+// Device-to-threadgroup staging is a separate step performed by the tile loader.
 template <typename T>
 METAL_FUNC void course_load_matrix(
     thread simdgroup_matrix<T, 8, 8>& matrix,

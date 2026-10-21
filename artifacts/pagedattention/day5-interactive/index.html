@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:,">
+<title>Day 5 · Paged FlashAttention 交互白板</title>
+<style>
+:root{--paper:#fffdf7;--ink:#193654;--orange:#dc651e;--highlight:#ffe8b8;--muted:#64788a;--line:#c9d2d7;--wash:#edf2f4;--soft:#f6f2e8;--red:#a74436;--green:#3b6b59;--hand:"Chalkboard SE","Chalkboard","Kaiti SC","STKaiti",cursive;--body:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;--mono:"SFMono-Regular",Consolas,monospace}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);font:15px/1.6 var(--body);background:var(--paper);background-image:radial-gradient(#bac6ce80 .8px,transparent .8px);background-size:19px 19px}button,input,select{font:inherit;color:inherit}button,select,input[type=range]{cursor:pointer}button{background:none;border:1px solid var(--line);border-radius:6px;padding:8px 13px;min-height:41px}button:hover:not(:disabled){border-color:var(--orange);background:#fff5e2}button:disabled{opacity:.38;cursor:default}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #dc651e80;outline-offset:3px}input[type=number],select{background:var(--paper);border:1px solid #abbac6;border-radius:5px;padding:7px 9px;width:100%;min-height:39px}input[type=range]{accent-color:var(--orange);width:100%}input[type=checkbox]{accent-color:var(--orange);width:16px;height:16px;vertical-align:middle}code,.mono{font-family:var(--mono);font-size:.9em}small,.small{font-size:12px;color:var(--muted)}.shell{max-width:1550px;padding:29px 40px 32px;margin:auto}.eyebrow{display:flex;justify-content:space-between;align-items:center;font:12px var(--mono);letter-spacing:.06em;color:var(--muted);gap:14px}.eyebrow span:last-child{border-bottom:1px solid var(--line);padding-bottom:3px}.hero{position:relative;padding:16px 0 22px}.hero h1{font-family:var(--hand);font-weight:700;font-size:clamp(30px,3.8vw,53px);line-height:1.25;letter-spacing:-.025em;margin:6px 0 10px}.marker{position:relative;white-space:nowrap;isolation:isolate}.marker:after{content:"";position:absolute;left:-3px;right:-6px;bottom:0;height:8px;background:var(--highlight);z-index:-1;transform:rotate(-1.1deg)}.hero p{margin:0;color:var(--muted);font-size:14px}.hero .scribble{position:absolute;right:5px;bottom:25px;transform:rotate(-5deg);font-family:var(--hand);font-size:21px;color:var(--orange)}.config{border-top:1.5px solid var(--ink);border-bottom:1px solid var(--line);padding:15px 0 16px;display:grid;grid-template-columns:1.65fr repeat(3,1fr) .85fr .85fr;gap:17px;align-items:end}.field{display:grid;gap:5px;font-size:12px;color:var(--muted)}.field strong{font-size:13px;color:var(--ink);font-weight:500}.routebar{display:flex;align-items:center;flex-wrap:wrap;gap:10px 14px;padding:13px 0 18px;font-size:12px}.route-tag{font-family:var(--mono);padding:3px 9px;border:1px solid var(--orange);background:#fff1d7;color:var(--orange);border-radius:3px}.route-tag.other{color:var(--ink);border-color:var(--ink);background:var(--wash)}.route-name{font-family:var(--mono);font-size:11px;overflow-wrap:anywhere}.dot-separator{color:#a4b2be}.workbench{display:grid;grid-template-columns:190px minmax(0,1fr) 242px;gap:25px;align-items:start}.steps{padding:10px 6px 0 0;position:relative}.steps:before{content:"";position:absolute;top:35px;bottom:50px;left:17px;border-left:1px dashed #9eb0be}.step{width:100%;border:0;border-radius:0;text-align:left;padding:7px 0 13px;display:flex;gap:10px;align-items:start;min-height:65px;position:relative}.step:hover:not(:disabled){background:transparent;border:0}.step .number{font-family:var(--hand);font-size:17px;width:34px;height:34px;border:1.4px solid var(--ink);border-radius:48% 52% 49% 51%;display:grid;place-items:center;flex:none;background:var(--paper)}.step strong{font-size:14px;font-weight:500;display:block;margin:1px 0 1px}.step small{display:block;font-size:10px;letter-spacing:.02em}.step.active .number{color:var(--orange);border-color:var(--orange);background:var(--highlight);transform:rotate(-5deg)}.step.active strong{color:var(--orange);background:linear-gradient(transparent 62%,var(--highlight) 62%);display:inline}.step.active small{color:var(--ink)}.stage{min-width:0}.stage-topline{display:flex;justify-content:space-between;gap:15px;align-items:center;padding:0 0 10px}.kicker{font:11px var(--mono);color:var(--orange);letter-spacing:.07em}.stage h2{font-family:var(--hand);font-size:27px;line-height:1.35;margin:4px 0 0;font-weight:700}.tile-controls{display:flex;align-items:center;gap:6px;flex:none}.tile-controls button{padding:4px 8px;min-height:32px}.tile-label{font:11px var(--mono);min-width:77px;text-align:center}.scene{background:#fffefbcc;border:1.4px solid #9dafbc;border-radius:3px 8px 5px 2px;min-height:410px;padding:23px 22px 19px;position:relative;overflow:hidden}.scene.reveal{animation:paper-in .24s ease-out}.scene h3{font-family:var(--hand);font-size:20px;margin:0 0 10px}.scene-note{font-size:12px;color:var(--muted);margin:10px 0 0}.scene-caption{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font:11px var(--mono);border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:17px}.scene-caption em{font:inherit;color:var(--orange);font-style:normal}.lesson{font-size:14px;line-height:1.85;min-height:75px;margin:13px 0 3px;padding-left:13px;border-left:3px solid var(--highlight)}.lesson b{color:var(--orange);font-weight:500}.playbar{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:13px;border-top:1px solid var(--line);padding:16px 0 9px}.play-buttons{display:flex;gap:5px}.play-buttons button{padding:7px 10px}.primary{background:var(--ink);border-color:var(--ink);color:var(--paper)}.primary:hover:not(:disabled){background:#274c70;color:#fff}.timeline{display:grid;gap:0;min-width:0}.timeline-caption{display:flex;justify-content:space-between;font:10px var(--mono);color:var(--muted)}.play-speed{width:65px;font-size:12px}.keyboard-hint{display:flex;justify-content:space-between;flex-wrap:wrap;gap:7px;font-size:10px;color:var(--muted)}.inspector{padding:10px 0 0 18px;border-left:1px solid var(--line);min-width:0}.inspector h3{font-family:var(--hand);font-size:20px;margin:0 0 12px}.query-select{display:grid;grid-template-columns:1fr 1fr;gap:10px}.query-range{margin:8px 0 2px}.query-meta{font-size:11px;color:var(--muted);margin-bottom:18px}.sticky-note{background:linear-gradient(174deg,#fff1cfcc,#fff8e6b8);padding:13px 14px 15px;transform:rotate(.5deg);border-bottom:2px solid var(--highlight);margin:15px 0}.sticky-note h4{font-family:var(--hand);font-size:17px;margin:0 0 10px}.stat{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid #dbc99e80;font-size:12px}.stat:last-child{border:0}.stat output{font-family:var(--mono);font-size:13px;color:var(--orange);font-variant-numeric:tabular-nums}.stat .units{font-size:10px;color:var(--muted)}.tiny-label{font:10px var(--mono);color:var(--muted);line-height:1.7}.experiment{font-size:12px;line-height:1.6;display:flex;align-items:flex-start;gap:8px;margin:17px 0 7px}.experiment input{flex:none;margin-top:2px}.experiment.active{color:var(--red)}.warning{background:#fff0e7;border-left:2px solid var(--red);padding:7px 9px;font-size:11px;color:var(--red);margin:9px 0}.formula{font-family:var(--mono);font-size:11px;line-height:1.9;padding:11px 0;color:var(--muted);overflow-wrap:anywhere}.formula mark{color:var(--ink);background:var(--highlight);padding:2px 4px}.aux{margin-top:17px;border-top:1px solid var(--line)}.aux-tabs{display:flex;gap:17px;padding:10px 0}.aux-tab{border:0;border-radius:0;padding:3px 0;min-height:30px;color:var(--muted);font-size:12px}.aux-tab[aria-selected=true]{color:var(--ink);border-bottom:2px solid var(--orange)}.aux-tab:hover:not(:disabled){background:transparent;border-bottom:2px solid var(--orange)}.code-panel{background:#eff2f1b0;border-left:2px solid var(--ink);padding:14px 16px;overflow-x:auto}.code-panel pre{margin:0;line-height:1.8;font-size:11px;font-family:var(--mono);white-space:pre-wrap;word-break:break-word}.code-file{color:var(--muted);font:10px var(--mono);margin-bottom:7px}.threads-panel{display:grid;grid-template-columns:1fr 170px;gap:20px;align-items:start;padding:8px 0}.lane-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:4px}.lane-btn{min-height:30px;padding:4px 0;font:11px var(--mono);border-radius:3px}.lane-btn.active{background:var(--highlight);color:var(--orange);border-color:var(--orange)}.fragment-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;width:160px}.fragment-cell{aspect-ratio:1;background:var(--wash);border:1px solid #d6dfe4}.fragment-cell.selected{background:var(--orange);border-color:var(--orange)}.lane-detail{font-size:11px;margin:9px 0;color:var(--muted)}.lane-detail strong{color:var(--orange);font-weight:500}.footer{margin-top:26px;padding:15px 0;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:17px;flex-wrap:wrap;color:var(--muted);font-size:11px}.footer span{max-width:780px}.qgrid{display:grid;grid-template-columns:repeat(8,1fr);gap:5px;margin-top:12px}.qcell{font:12px var(--mono);padding:5px 0;border-radius:3px;min-height:30px;background:#edf2f580;border-color:#b7c7d1}.qcell.selected{color:var(--orange);background:var(--highlight);border-color:var(--orange)}.qcell.same-group{border-bottom-color:var(--orange);border-bottom-width:2px}.qcell:disabled{background:repeating-linear-gradient(135deg,#e8ebeb 0px,#e8ebeb 2px,transparent 2px,transparent 6px);opacity:.45}.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:10px;color:var(--muted);margin-top:13px}.legend span:before{content:"";display:inline-block;width:8px;height:8px;margin-right:5px;background:var(--wash);border:1px solid #c3ced6}.legend .chosen:before{background:var(--highlight);border-color:var(--orange)}.legend .invalid:before{background:repeating-linear-gradient(135deg,#bbc6cb 0px,#bbc6cb 1px,transparent 1px,transparent 3px)}.transfer{display:grid;grid-template-columns:1fr 65px 1fr;align-items:center;gap:10px;padding:35px 0 22px}.memory-block{border:1.5px solid var(--ink);border-radius:2px 6px 4px 5px;padding:20px 13px;min-width:0;text-align:center}.memory-block.active{border-color:var(--orange);background:#fff1d6}.memory-block strong{font:22px var(--hand);display:block}.memory-block small{display:block;margin-top:6px}.drawn-arrow{font:42px var(--hand);text-align:center;color:var(--orange);position:relative}.drawn-arrow .particle{position:absolute;height:6px;width:6px;border-radius:100%;background:var(--orange);left:1px;top:50%;animation:transfer 1.3s ease-in-out 1}.memory-caption{text-align:center;font:13px var(--hand);color:var(--orange)}.load-stripes{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-top:25px}.load-stripes span{font:10px var(--mono);padding:9px 3px;text-align:center;background:var(--wash);border-bottom:2px solid #a5b8c6}.load-stripes span:first-child{border-bottom-color:var(--orange);background:#fff0d4}.keygrid{display:grid;grid-template-columns:repeat(8,1fr);gap:4px}.keycell{display:grid;gap:1px;min-height:46px;border-radius:3px;padding:4px 0;font:12px var(--mono);background:#edf2f580}.keycell small{font-size:9px}.keycell.page-b{background:#fff3df}.keycell.invalid{background:#f0f0ec;color:#8b979e;border-style:dashed}.keycell.selected{border:2px solid var(--orange);padding:3px 0;color:var(--orange)}.page-table{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0 5px}.page-entry{padding:5px 10px;border:1px solid var(--ink);border-radius:3px;font:11px var(--mono);display:grid;text-align:center;gap:2px;min-width:72px}.page-entry.active{border-color:var(--orange);background:#fff0d2}.page-entry small{font-size:9px}.page-entry strong{font-weight:500;font-size:14px}.address{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin:15px 0 5px;font:12px var(--mono);padding:10px 0;border-top:1px dashed var(--line)}.address b{color:var(--orange);font-weight:500}.matrix-flow{display:grid;grid-template-columns:1fr 30px 1fr 30px 1fr;align-items:center;gap:7px;min-height:245px}.matrix-operand{text-align:center;min-width:0}.matrix-operand strong{font:23px var(--hand);display:block;margin-bottom:10px}.matrix-operand small{display:block;margin-top:10px;font-size:10px}.fragments{display:grid;gap:2px;min-height:25px}.frag{background:#d9e4eb;border:1px solid #9db2c3;min-height:8px}.frag.hot{background:#ffd898;border-color:var(--orange)}.matrix-sign{font:27px var(--hand);color:var(--orange);text-align:center}.math-note{text-align:center;margin:6px 0 0;font:14px var(--hand);color:var(--orange)}.heatmap{display:block;width:100%;height:265px}.heat-legend{display:flex;justify-content:space-between;gap:10px;font:10px var(--mono);color:var(--muted);margin-top:8px}.focus-key{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:11px}.focus-key input{flex:1;min-width:50px}.focus-key output{font-family:var(--mono);min-width:50px;text-align:right}.mask-equation{text-align:center;font:17px var(--mono);padding:6px 0}.mask-equation strong{color:var(--orange);font-weight:500}.state-flow{display:grid;grid-template-columns:1fr 35px 1fr;gap:10px;align-items:center;margin:16px 0}.state-column{border-top:2px solid var(--ink);padding:10px 0}.state-column.after{border-color:var(--orange)}.state-column h4{font:16px var(--hand);margin:0 0 9px}.state-column dl{display:grid;grid-template-columns:25px 1fr;gap:7px;font:15px var(--mono);margin:0}.state-column dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}.alpha{font:25px var(--hand);text-align:center;color:var(--orange);padding:11px 0;border-bottom:1px dashed var(--line)}.weight-chart{height:69px;display:flex;gap:3px;align-items:end;padding:5px 2px 0;border-bottom:1px solid var(--line);margin-top:10px}.weight-chart div{flex:1;min-width:1px;background:#50728b;min-height:1px;transition:height .3s ease}.weight-chart div.focus{background:var(--orange)}.weight-axis{display:flex;justify-content:space-between;font:9px var(--mono);color:var(--muted);margin-top:4px}.rescale-formula{font:12px/1.9 var(--mono);padding-top:12px}.rescale-formula strong{font-weight:500;background:var(--highlight);padding:2px 4px}.buffer-swap{display:flex;justify-content:center;gap:14px;align-items:center;font:13px var(--mono);padding:10px 0}.buffer-swap span{padding:6px 10px;border:1px dashed var(--ink);border-radius:3px}.buffer-swap .now{background:var(--highlight);color:var(--orange);border-color:var(--orange)}.contribution{padding:13px 0;border-top:1px dashed var(--line);font:13px/1.9 var(--mono);text-align:center}.result-sum{text-align:center;padding:16px 0 10px}.result-sum .result-number{font:48px var(--hand);color:var(--orange);font-variant-numeric:tabular-nums;line-height:1.3}.result-sum p{font:13px var(--mono);margin:6px 0}.result-compare{display:grid;grid-template-columns:1fr 1fr;gap:22px;border-top:1px dashed var(--line);padding:15px 0;margin-top:16px}.result-compare span{display:block;font-size:11px;color:var(--muted)}.result-compare strong{font:18px var(--mono);font-weight:400;overflow-wrap:anywhere}.mini-bars{display:flex;gap:6px;align-items:end;height:70px;margin:14px 0}.mini-bars div{flex:1;min-width:0;background:#d4e0e8;min-height:5px;position:relative}.mini-bars div.done{background:#edbd7d}.mini-bars div:after{content:attr(data-i);position:absolute;top:100%;left:0;right:0;text-align:center;font:9px var(--mono);color:var(--muted);padding-top:3px}.mini-bars div:first-child:after{left:0;right:auto;min-width:20px;text-align:left}.mini-bars div:last-child:after{left:auto;right:0;min-width:20px;text-align:right}.fallback{min-height:410px;display:grid;align-content:center;gap:22px;padding:20px 6px;text-align:center}.fallback h3{font:30px var(--hand);margin:0}.fallback p{margin:0;font-size:14px;color:var(--muted)}.fallback .route-name{font-size:12px}.fallback-flow{display:flex;align-items:center;justify-content:center;gap:12px;font:16px var(--hand);flex-wrap:wrap}.fallback-flow span{padding:13px 15px;border:1px solid var(--ink);border-radius:3px}.fallback-flow b{color:var(--orange);font-weight:500}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}[hidden]{display:none!important}@keyframes paper-in{from{transform:translateY(4px);opacity:.65}to{transform:translateY(0);opacity:1}}@keyframes transfer{0%{left:0;opacity:0}15%{opacity:1}85%{opacity:1}100%{left:100%;opacity:0}}@media(min-width:1450px){.scene{min-height:445px}.qcell{min-height:35px}.step{min-height:69px}}@media(max-width:1170px){.shell{padding:24px}.workbench{grid-template-columns:155px minmax(0,1fr) 205px;gap:18px}.hero .scribble{display:none}.step strong{font-size:12px}.step small{font-size:9px}.scene{padding:18px 15px}.inspector{padding-left:14px}.config{gap:11px}.stage h2{font-size:23px}.query-select{grid-template-columns:1fr}.sticky-note{padding:11px}.matrix-flow{gap:4px;grid-template-columns:1fr 20px 1fr 20px 1fr}.matrix-operand strong{font-size:20px}}
+@media(max-width:940px){.workbench{grid-template-columns:minmax(0,1fr) 220px;gap:22px}.steps{grid-column:1/-1;display:grid;grid-template-columns:repeat(8,1fr);gap:5px;padding:0}.steps:before{display:none}.step{display:grid;justify-items:center;text-align:center;gap:5px;padding:0 0 9px;min-height:70px}.step strong{font-size:11px;white-space:nowrap}.step small{display:none}.step .number{width:30px;height:30px;font-size:15px}.config{grid-template-columns:1.4fr 1fr 1fr;gap:12px}.hero h1{font-size:39px}.query-select{grid-template-columns:1fr 1fr}.routebar{padding-bottom:12px}.scene{min-height:405px}}
+@media(max-width:650px){.shell{padding:18px 16px}.hero{padding:16px 0 20px}.hero h1{font-size:32px;line-height:1.35}.hero p{font-size:12px;max-width:340px}.eyebrow{font-size:9px;letter-spacing:0;align-items:start}.eyebrow span:last-child{max-width:145px;text-align:right}.config{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.config .field:first-child{grid-column:1/-1}.field{font-size:10px;gap:3px}.field strong{font-size:11px}input[type=number],select{font-size:14px;min-height:40px;padding:7px}.routebar{font-size:10px;gap:7px 9px}.route-name{font-size:9px}.dot-separator{display:none}.workbench{grid-template-columns:minmax(0,1fr);gap:14px}.steps{gap:3px}.step{min-height:66px}.step strong{font-size:9px}.step .number{width:26px;height:26px;font-size:14px}.stage-topline{align-items:center}.stage h2{font-size:23px}.kicker{font-size:9px}.tile-controls{gap:3px}.tile-label{font-size:9px;min-width:58px}.tile-controls button{padding:3px 7px;min-height:33px}.scene{padding:17px 13px;min-height:375px}.scene-caption{font-size:9px;gap:6px;margin-bottom:14px}.qgrid{gap:4px}.qcell{font-size:11px;min-height:30px}.legend{gap:10px;font-size:9px}.lesson{font-size:12px;line-height:1.8;min-height:0;margin:12px 0}.playbar{gap:10px;grid-template-columns:auto 1fr auto}.play-buttons button{font-size:11px;padding:6px 8px;min-height:37px}.play-speed{font-size:11px;width:55px;padding:5px}.timeline-caption{font-size:9px}.keyboard-hint{font-size:9px}.inspector{border-left:0;border-top:1px solid var(--line);padding:17px 0 0;display:grid;grid-template-columns:1fr 1fr;gap:0 17px}.inspector h3{font-size:18px;grid-column:1/-1;margin-bottom:8px}.query-fields{min-width:0}.sticky-note{margin:0;padding:10px 12px}.sticky-note h4{font-size:14px;margin-bottom:4px}.stat{padding:5px 0;font-size:10px}.stat output{font-size:11px}.query-meta{font-size:10px;margin-bottom:0}.experiment{font-size:11px;margin-top:13px;grid-column:1/-1}.formula{font-size:10px;padding:5px 0;grid-column:1/-1}.warning{grid-column:1/-1}.transfer{grid-template-columns:1fr 38px 1fr;gap:5px;padding:35px 0 15px}.drawn-arrow{font-size:30px}.memory-block{padding:18px 7px}.memory-block strong{font-size:18px}.memory-block small{font-size:10px}.load-stripes{gap:4px}.load-stripes span{font-size:8px;padding:7px 2px}.memory-caption{font-size:12px}.keycell{min-height:44px;font-size:11px}.keycell small{font-size:8px}.keygrid{gap:3px}.address{font-size:10px;gap:5px}.page-entry{min-width:60px;font-size:10px;padding:5px 7px}.page-entry strong{font-size:12px}.matrix-flow{grid-template-columns:1fr 17px 1fr 17px 1fr;gap:4px;min-height:220px}.matrix-operand strong{font-size:17px}.matrix-operand small{font-size:8px}.matrix-sign{font-size:20px}.fragments{gap:2px}.math-note{font-size:12px}.mask-equation{font-size:12px}.heatmap{height:245px}.focus-key{font-size:10px}.state-column h4{font-size:14px}.state-column dl{font-size:12px;gap:10px;grid-template-columns:15px 1fr}.alpha{font-size:20px}.rescale-formula{font-size:10px}.result-sum .result-number{font-size:39px}.result-compare strong{font-size:15px}.result-compare{gap:13px}.threads-panel{grid-template-columns:1fr;gap:15px}.fragment-wrap{display:flex;align-items:center;gap:15px}.fragment-grid{width:144px;flex:none}.lane-btn{min-height:35px}.aux{margin-top:13px}.footer{font-size:10px}.code-panel{padding:12px}.code-panel pre{font-size:10px}.buffer-swap{font-size:10px;gap:9px}.contribution{font-size:11px}.fallback h3{font-size:24px}.fallback p{font-size:12px}.fallback-flow{font-size:13px}}
+@media(max-width:650px){.steps{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 5px}.step{min-width:0;min-height:63px}.step strong{font-size:11px;white-space:normal;line-height:1.45}.step>span:last-child{min-width:0}.stage-topline{margin-top:4px}}
+@media(max-width:380px){.query-select{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+@media print{body{background:#fff}.config,.playbar,.steps,.keyboard-hint,.aux,.experiment{display:none}.workbench{display:block}.inspector{border:0}.shell{padding:20px}.scene{break-inside:avoid}}
+</style>
+</head>
+<body>
+<main class="shell" id="day5-app">
+  <div class="eyebrow"><span>TINY-LLM / ENGINEERING WHITEBOARD</span><span>可离线交互 · 无需运行 GPU</span></div>
+  <header class="hero"><h1>一块 <span class="marker">Q</span>，走完分页 <span class="marker">K/V</span></h1><p>沿着 Day 5 的真实执行顺序，看见分页寻址、矩阵乘法与在线 Softmax 如何协作。</p><div class="scribble">先找数据，再算一块 ↘</div></header>
+  <section class="config" aria-label="算子输入配置">
+    <label class="field"><strong>选择一个推演场景</strong><select id="preset"><option value="cross">跨页 + 尾块 · 从这里开始</option><option value="standard">标准长 Prefill</option><option value="spike">最大值突变 · 观察重缩放</option><option value="decode">逐 Token Decode</option><option value="custom" disabled>自定义参数</option></select></label>
+    <label class="field"><strong>Query 长度 L</strong><input id="query-length" type="number" min="1" max="256" value="65" aria-label="Query 长度 L"></label>
+    <label class="field"><strong>总上下文长度 S</strong><input id="context-length" type="number" min="65" max="4096" value="129" aria-label="总上下文长度 S"></label>
+    <label class="field"><strong>每页 Token 数</strong><select id="page-size"><option>16</option><option selected>33</option><option>64</option><option>128</option></select></label>
+    <label class="field"><strong>输入 dtype</strong><select id="dtype"><option value="bf16">BF16</option><option value="f32">float32</option></select></label>
+    <label class="field"><strong>Head 维度 D</strong><select id="head-dim"><option selected>128</option><option>64</option></select></label>
+  </section>
+  <div class="routebar" id="routebar" aria-live="polite"></div>
+  <div class="workbench">
+    <nav class="steps" aria-label="内核执行步骤" id="steps"></nav>
+    <section class="stage" aria-label="动态推演区">
+      <div class="stage-topline"><div><div class="kicker" id="stage-kicker"></div><h2 id="stage-title"></h2></div><div class="tile-controls"><button id="tile-prev" aria-label="上一个 K/V Tile">‹</button><span class="tile-label" id="tile-label"></span><button id="tile-next" aria-label="下一个 K/V Tile">›</button></div></div>
+      <div class="scene" id="scene"></div>
+      <p class="lesson" id="lesson"></p>
+      <div class="playbar"><div class="play-buttons"><button id="prev" aria-label="上一步">←</button><button id="play" class="primary" aria-pressed="false">播放</button><button id="next" aria-label="下一步">→</button></div><div class="timeline"><div class="timeline-caption"><span id="frame-label"></span><span id="frame-total"></span></div><input id="timeline" type="range" min="0" value="0" aria-label="推演进度"></div><select class="play-speed" id="speed" aria-label="播放速度"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></div>
+      <div class="keyboard-hint"><span>← → 逐步推演 · 空格播放 / 暂停</span><span>64 Q × 32 K/V · 8 SIMD groups</span></div>
+      <section class="aux"><div class="aux-tabs" role="tablist" aria-label="展开细节"><button class="aux-tab" id="tab-code" role="tab" aria-selected="true" aria-controls="code-panel">对照代码</button><button class="aux-tab" id="tab-thread" role="tab" aria-selected="false" aria-controls="thread-panel">拆开 32 个 lane</button></div><div id="code-panel" role="tabpanel" aria-labelledby="tab-code" class="code-panel"><div class="code-file" id="code-file"></div><pre><code id="code"></code></pre></div><div id="thread-panel" role="tabpanel" aria-labelledby="tab-thread" hidden><div class="threads-panel"><div><div class="tiny-label" style="margin-bottom:8px">点击 lane，查看它持有的两个矩阵元素</div><div class="lane-grid" id="lane-grid"></div></div><div class="fragment-wrap"><div class="fragment-grid" id="fragment-grid" aria-label="一个 8×8 矩阵片段"></div><p class="lane-detail" id="lane-detail"></p></div></div></div></section>
+    </section>
+    <aside class="inspector" aria-label="选定 Query 的计算状态"><h3>跟住一行 Query</h3><div class="query-fields"><div class="query-select"><label class="field"><strong>相对位置 l</strong><input id="selected-query" type="number" min="0" max="64" value="0" aria-label="选定 Query 位置"></label><label class="field"><strong>Query Head</strong><select id="selected-head"><option value="0">Head 0</option><option value="1">Head 1</option><option value="2">Head 2</option><option value="3">Head 3</option></select></label></div><input class="query-range" id="query-range" type="range" min="0" max="64" value="0" aria-label="移动选定 Query"><div class="query-meta" id="query-meta"></div></div><div class="sticky-note"><h4 id="state-heading">初始状态</h4><div class="stat"><span>m <span class="units">log₂ 单位</span></span><output id="value-m">−∞</output></div><div class="stat"><span>ℓ <span class="units">指数和</span></span><output id="value-l">0</output></div><div class="stat"><span>u[0] <span class="units">未归一化</span></span><output id="value-u">0</output></div><div class="tiny-label" id="state-caption" style="margin-top:7px"></div></div><label class="experiment" id="experiment-label"><input id="bad-scale" type="checkbox"><span>错误实验：省略历史重缩放</span></label><div class="warning" id="warning" hidden>仅用于观察错误结果。真实内核会同时缩放旧 ℓ 和旧 u。</div><div class="formula" id="side-formula"><mark>m′ = max(m, max(x))</mark><br>α = 2^(m − m′)<br>ℓ′ = αℓ + Σp<br>u′ = αu + BF16(p)V<br>O = BF16(u / ℓ)</div></aside>
+  </div>
+  <footer class="footer"><span>教学计算使用确定性合成数据：Q/K 按完整 D 维点积，仅展示输出第 0 维。FP32 状态与 BF16 舍入在 CPU 上近似演示，非 GPU 逐位复现或性能测量。</span><span>从 0 开始索引 · B=1 · Hq=4 · Hkv=2</span></footer>
+  <div class="sr-only" id="announcement" role="status" aria-live="polite"></div>
+</main>
+<script>
+(function (root) {
+  'use strict';
+
+  // CPU teaching model. Math.fround approximates FP32 state; the GPU's MMA
+  // reduction order and fast::exp2 are implementation-dependent.
+  const F = Math.fround;
+  const LOG2E = Math.LOG2E;
+  const bfStorage = new ArrayBuffer(4);
+  const bfFloat = new Float32Array(bfStorage);
+  const bfBits = new Uint32Array(bfStorage);
+  const BQ = 64;
+  const BK = 32;
+  const HQ = 4;
+  const HKV = 2;
+
+  function laneCoord(lane) {
+    if (!Number.isInteger(lane) || lane < 0 || lane >= 32) {
+      throw new RangeError('lane must be an integer from 0 to 31');
+    }
+    return {
+      x: (lane & 1) * 2 + ((lane & 8) >> 1),
+      y: ((lane & 7) >> 1) + ((lane & 16) >> 2),
+    };
+  }
+
+  function bf16(number) {
+    bfFloat[0] = number;
+    const bits = bfBits[0];
+    if ((bits & 0x7f800000) === 0x7f800000) {
+      // Keep infinities; preserve NaN rather than rounding it to infinity.
+      bfBits[0] = ((bits & 0x7fffff) ? bits | 0x00400000 : bits) & 0xffff0000;
+    } else {
+      bfBits[0] = (bits + 0x7fff + ((bits >>> 16) & 1)) & 0xffff0000;
+    }
+    return bfFloat[0];
+  }
+
+  function route(config) {
+    const L = Number(config.L);
+    const D = Number(config.D);
+    const dtype = String(config.dtype || 'bf16').toLowerCase();
+    const isBF16 = dtype === 'bf16' || dtype === 'bfloat16';
+    if (L <= 8) {
+      const suffix = isBF16 && D === 128 ? '_d128' : D > 256 ? '_wide' : D > 128 ? '_max256' : '';
+      return {
+        kind: 'decode',
+        name: (isBF16 ? 'paged_attention_decode_bf16' : 'paged_attention_decode_f32') + suffix,
+        reason: 'L ≤ 8，使用短 Query / Decode 路径。',
+      };
+    }
+    if (isBF16 && D === 128) {
+      return {
+        kind: 'mma',
+        name: 'paged_attention_mma_bf16_d128',
+        reason: 'L > 8、BF16、D = 128，使用 Day 5 的 SIMD 矩阵内核。',
+      };
+    }
+    return {
+      kind: 'scalar',
+      name: isBF16 ? 'paged_attention_scalar_bf16' : 'paged_attention_scalar_f32',
+      reason: '不满足 BF16 与 D = 128 的专用条件，保留标量 Prefill 路径。',
+    };
+  }
+
+  function normalizedConfig(input) {
+    const cfg = Object.assign({ L: 65, context: 129, pageSize: 33, D: 128, dtype: 'bf16', spike: false }, input || {});
+    for (const key of ['L', 'context', 'pageSize', 'D']) {
+      cfg[key] = Number(cfg[key]);
+      if (!Number.isInteger(cfg[key]) || cfg[key] < (key === 'context' ? 0 : 1)) {
+        throw new RangeError(key + ' must be a valid nonnegative/positive integer');
+      }
+    }
+    if (cfg.context > 0 && cfg.context < cfg.L) {
+      throw new RangeError('A nonempty context must be at least L');
+    }
+    cfg.dtype = String(cfg.dtype).toLowerCase();
+    cfg.spike = Boolean(cfg.spike);
+    return cfg;
+  }
+
+  function create(input) {
+    const config = normalizedConfig(input);
+    const { L, context, pageSize, D, spike } = config;
+    const pageCount = Math.ceil(context / pageSize);
+    const firstPages = [12, 5, 3, 8];
+    const blockTable = Array.from({ length: pageCount }, (_, i) => i < 4 ? firstPages[i] : 17 + (i - 4) * 7);
+    const qCache = new Map();
+    const kCache = new Map();
+    const traceCache = new Map();
+    const scale = 1 / Math.sqrt(D);
+    const scaleLog2 = F(scale * LOG2E);
+
+    function checkQuery(query) {
+      if (!Number.isInteger(query) || query < 0 || query >= L) throw new RangeError('Query index is outside [0, L)');
+    }
+    function checkHead(head) {
+      if (!Number.isInteger(head) || head < 0 || head >= HQ) throw new RangeError('Head index is outside [0, 4)');
+    }
+    function rowVisible(query) {
+      return context === 0 ? 0 : Math.max(0, Math.min(context, query + context - L + 1));
+    }
+    function blockVisible(query) {
+      if (context === 0) return 0;
+      const last = Math.min(Math.floor(query / BQ) * BQ + BQ, L) - 1;
+      return Math.max(0, Math.min(context, context - L + last + 1));
+    }
+    function qVector(query, head) {
+      const id = head * L + query;
+      if (!qCache.has(id)) {
+        const q = new Float32Array(D);
+        for (let d = 0; d < D; d++) {
+          q[d] = spike ? (d === 0 ? 1 : 0) : bf16(
+            0.42 * Math.sin((query + 1) * 0.13 + (d + 1) * 0.17)
+            + 0.28 * Math.cos((head + 1) * 0.61 + (d + 1) * 0.07)
+          );
+        }
+        qCache.set(id, q);
+      }
+      return qCache.get(id);
+    }
+    function kVector(key, kvHead) {
+      const id = kvHead * Math.max(1, context) + key;
+      if (!kCache.has(id)) {
+        const k = new Float32Array(D);
+        for (let d = 0; d < D; d++) {
+          k[d] = spike ? (key === context - 1 && d === 0 ? bf16(20 / scale) : 0) : bf16(
+            0.50 * Math.cos((key + 1) * 0.09 + (d + 1) * 0.17)
+            + 0.25 * Math.sin((kvHead + 1) * 0.83 + (d + 1) * 0.11)
+          );
+        }
+        kCache.set(id, k);
+      }
+      return kCache.get(id);
+    }
+    function value(head, key) {
+      checkHead(head);
+      const kvHead = Math.floor(head / (HQ / HKV));
+      return spike ? (key === context - 1 ? -7 : 1) : bf16(
+        0.85 * Math.sin((key + 1) * 0.131 + kvHead * 0.73)
+        + 0.35 * Math.cos((key + 1) * 0.071 - kvHead * 0.40)
+      );
+    }
+    function dot(query, head, key, fp32) {
+      const q = qVector(query, head);
+      const k = kVector(key, Math.floor(head / (HQ / HKV)));
+      let result = 0;
+      for (let d = 0; d < D; d++) {
+        result = fp32 ? F(result + F(q[d] * k[d])) : result + q[d] * k[d];
+      }
+      return result;
+    }
+    function score(query, head, key) {
+      checkQuery(query);
+      checkHead(head);
+      if (!Number.isInteger(key) || key < 0 || key >= context) return -Infinity;
+      return F(dot(query, head, key, true) * scaleLog2);
+    }
+    function tiles(query) {
+      checkQuery(query);
+      return Math.ceil(blockVisible(query) / BK);
+    }
+    function tileInfo(query, tileIndex) {
+      checkQuery(query);
+      if (!Number.isInteger(tileIndex) || tileIndex < 0) throw new RangeError('Tile index must be nonnegative');
+      const start = tileIndex * BK;
+      const visible = blockVisible(query);
+      const rv = rowVisible(query);
+      const live = Math.max(0, Math.min(BK, visible - start));
+      const rows = Array.from({ length: BK }, (_, i) => {
+        const key = start + i;
+        const logicalPage = Math.floor(key / pageSize);
+        const valid = i < live;
+        return {
+          key,
+          logicalPage,
+          physicalPage: valid ? blockTable[logicalPage] : -1,
+          slot: key % pageSize,
+          valid,
+          causalVisible: valid && key < rv,
+        };
+      });
+      return {
+        index: tileIndex,
+        start,
+        live,
+        onePage: start % pageSize + BK <= pageSize,
+        visible,
+        rowVisible: rv,
+        rows,
+      };
+    }
+    function reference(query, head) {
+      const rv = rowVisible(query);
+      if (rv === 0) return 0;
+      const scores = new Float64Array(rv);
+      let max = -Infinity;
+      for (let key = 0; key < rv; key++) {
+        scores[key] = dot(query, head, key, false) * scale;
+        max = Math.max(max, scores[key]);
+      }
+      let denominator = 0;
+      let numerator = 0;
+      for (let key = 0; key < rv; key++) {
+        const weight = Math.exp(scores[key] - max);
+        denominator += weight;
+        numerator += weight * value(head, key);
+      }
+      return numerator / denominator;
+    }
+    function trace(query, head, badScale) {
+      checkQuery(query);
+      checkHead(head);
+      const cacheKey = query + ':' + head + ':' + Boolean(badScale);
+      if (traceCache.has(cacheKey)) return traceCache.get(cacheKey);
+      let m = -Infinity;
+      let l = 0;
+      let u = 0;
+      const steps = [];
+      for (let tileIndex = 0; tileIndex < tiles(query); tileIndex++) {
+        const info = tileInfo(query, tileIndex);
+        const before = { m, l, u };
+        const scores = info.rows.map(row => row.causalVisible ? score(query, head, row.key) : -Infinity);
+        const tileMax = Math.max.apply(null, scores);
+        const newMax = Math.max(m, tileMax);
+        const alpha = Number.isFinite(newMax) && Number.isFinite(m) ? F(Math.pow(2, F(m - newMax))) : 0;
+        const weights = scores.map(x => Number.isFinite(x) && Number.isFinite(newMax) ? F(Math.pow(2, F(x - newMax))) : 0);
+        const probabilities = weights.map(bf16);
+        let weightSum = 0;
+        let weightedValue = 0;
+        for (let i = 0; i < BK; i++) {
+          weightSum = F(weightSum + weights[i]);
+          if (info.rows[i].causalVisible) {
+            weightedValue = F(weightedValue + F(probabilities[i] * value(head, info.rows[i].key)));
+          }
+        }
+        const scaleApplied = badScale ? 1 : alpha;
+        const oldLScaled = F(scaleApplied * l);
+        const oldUScaled = F(scaleApplied * u);
+        l = F(oldLScaled + weightSum);
+        u = F(oldUScaled + weightedValue);
+        m = newMax;
+        steps.push(Object.assign({}, info, {
+          before,
+          scores,
+          tileMax,
+          newMax,
+          alpha,
+          scaleApplied,
+          weights,
+          probabilities,
+          weightSum,
+          weightedValue,
+          oldLScaled,
+          oldUScaled,
+          after: { m, l, u },
+          allMasked: !scores.some(Number.isFinite),
+        }));
+      }
+      const output = l > 0 ? F(u / l) : 0;
+      const outputBF16 = bf16(output);
+      const ref = reference(query, head);
+      const result = {
+        steps,
+        output,
+        outputBF16,
+        reference: ref,
+        error: Math.abs(outputBF16 - ref),
+        errorBeforeBF16: Math.abs(output - ref),
+        rowVisible: rowVisible(query),
+        blockVisible: blockVisible(query),
+        badScale: Boolean(badScale),
+      };
+      traceCache.set(cacheKey, result);
+      return result;
+    }
+    return {
+      config,
+      blockTable,
+      tileInfo,
+      tiles,
+      score,
+      value,
+      trace,
+      heads: HQ,
+      kvHeads: HKV,
+      queryBlockSize: BQ,
+      kvBlockSize: BK,
+      modelNote: 'CPU 教学近似：FP32 状态 + BF16 数据/权重，非 GPU 逐位复现。',
+    };
+  }
+
+  root.Day5Sim = Object.freeze({ laneCoord, bf16, route, create });
+})(typeof globalThis !== 'undefined' ? globalThis : window);
+
+</script>
+<script>
+(function(){
+'use strict';
+const $=id=>document.getElementById(id), Sim=globalThis.Day5Sim;
+const phases=[
+ {name:'选定 Q 块',sub:'dispatch / ownership',title:'先把 Query 分给线程',line:'448–480',lesson:'一个 threadgroup 负责同一 Head 的最多 <b>64 行 Query</b>。256 个线程组成 8 个 SIMD group，每组计算 8 行；点击格子，跟住其中一行。',code:'const bool tiled_prefill =\n    length > 8 && dtype == BF16 && D == 128;\n// grid = [B × Hq, ceil(L / 64), 1]\n// 256 threads = 8 SIMD groups × 32 lanes\nquery_pos = query_start + group * 8 + coord.y;'},
+ {name:'Q 搬入片上',sub:'load once / reuse',title:'Q 留下来，K/V 流过去',line:'485–491',lesson:'把 Q 从设备内存搬到共享区 <b>一次</b>。每线程加载 32 个 BF16 元素；不足 64 行的尾块填 0。后续每轮仍从共享区读取矩阵片段。',code:'threadgroup bfloat q_tile[64 * 130];\nQLoader::load(q + q_base + query_start * 128,\n              128, q_tile, thread_idx, live_queries, 128);\nthreadgroup_barrier(mem_flags::mem_threadgroup);'},
+ {name:'按页表取 K',sub:'logical → physical',title:'逻辑相邻，物理可以不相邻',line:'501–538',lesson:'先用 <b>逻辑页 → 物理页 → 页内槽位</b> 找到 K。完整 Tile 在同一页时只查一次页表；跨页时逐 Key 翻译，加载后在共享区排成 Kᵀ。',code:'first_slot = tile_start % page_size;\none_page = first_slot + 32 <= page_size;\nlogical_page = key_position / page_size;\nphysical_page = table[batch, logical_page];\n// K shared layout: [128, 32] with padding\nkv_tile[dim * 34 + key] = keys[physical_address];'},
+ {name:'算 QKᵀ',sub:'8 × 8 matrix fragments',title:'把点积组织成矩阵乘法',line:'540–553',lesson:'每个 SIMD group 计算 <b>8×32</b> 个分数。128 维归约拆成 16 段，每段做 4 次 8×8 MMA，输入 BF16、累积 FP32。',code:'simdgroup_matrix<float, 8, 8> scores[4];\n#pragma clang loop unroll(full)\nfor (int dim = 0; dim < 128; dim += 8)\n  for (int i = 0; i < 4; ++i)\n    simdgroup_multiply_accumulate(\n        scores[i], Q_fragment, K_fragment, scores[i]);'},
+ {name:'Scale + mask',sub:'causal visibility',title:'先确定每行能看到谁',line:'554–564',lesson:'分数乘 <b>scale × log₂(e)</b>，为后续 exp2 统一单位。每行只保留自己的可见 Key；未来位置设为 −∞，权重随后变成 0。',code:'scale_log2 = scale * log2(e);\nvalid = query_pos < L && key < context &&\n        key <= query_pos + context - L;\nscores = valid ? scores * scale_log2 : -INFINITY;'},
+ {name:'在线 Softmax',sub:'max / sum / rescale',title:'新块来了，历史也要换尺度',line:'566–589',lesson:'最大值变化时，旧分母 ℓ 和旧输出 u 必须<b>同时乘 α</b>。当前权重在 FP32 中计算，参与 PV 前转成 BF16。切换“最大值突变”可看清这一步。',code:'m_new = max(m, row_max(scores));\nalpha = exp2(m - m_new);\np = exp2(scores - m_new);\nl = alpha * l + row_sum(p);\nu *= alpha;\nprobabilities = BF16(p);'},
+ {name:'复用缓冲 / PV',sub:'reuse K storage for V',title:'共享区换成 V，累积输出',line:'591–623',lesson:'所有线程读完 K 之后，再把同一缓冲区改写为 V。每组计算 <b>[8,32] × [32,128]</b>，把本 Tile 的贡献加入 FP32 输出累积。',code:'threadgroup_barrier(mem_flags::mem_threadgroup);\n// reuse kv_tile: Kᵀ[128,32] → V[32,128]\nVLoader::load(value_pages, ..., kv_tile, ...);\nthreadgroup_barrier(mem_flags::mem_threadgroup);\nfor (int i = 0; i < 16; ++i)\n  for (int j = 0; j < 4; ++j)\n    output[i] += probabilities[j] @ V_fragment;'},
+ {name:'归一化写回',sub:'one final store',title:'所有可见 Tile 算完，再写回',line:'626–638',lesson:'最后才计算 <b>O = u / ℓ</b>，转换为 BF16 并写回。尾块中的无效 Query 仍参与加载与同步，但不会写到输出范围之外。',code:'if (query_pos < L) {\n  output = running_sum > 0\n      ? BF16(accumulator / running_sum)\n      : BF16(0);\n  store(output);\n}'}
+];
+const s={cfg:{L:65,context:129,pageSize:33,D:128,dtype:'bf16',spike:false},q:0,head:0,lane:0,key:0,index:0,playing:false,speed:1,bad:false,tab:'code'};
+let model,trace,frames=[],timer=null,lastScene='';
+function fmt(x,d=4){if(x===-Infinity)return '−∞';if(x===Infinity)return '+∞';if(!Number.isFinite(x))return '—';if(x===0)return '0';if(Math.abs(x)<.0001||Math.abs(x)>=100000)return x.toExponential(2);return Number(x.toFixed(d)).toString();}
+function clamp(n,a,b){return Math.min(b,Math.max(a,n));}
+function current(){return frames[s.index]||{phase:0,tile:0};}
+function makeFrames(){const n=model.tiles(s.q);frames=[{phase:0,tile:0},{phase:1,tile:0}];for(let t=0;t<n;t++)for(let p=2;p<=6;p++)frames.push({phase:p,tile:t});frames.push({phase:7,tile:Math.max(0,n-1)});}
+function updateModel(reset=true){pause();model=Sim.create(s.cfg);s.q=clamp(s.q,0,s.cfg.L-1);trace=model.trace(s.q,s.head,s.bad);makeFrames();s.index=reset?0:clamp(s.index,0,frames.length-1);render();}
+function selectedStep(){return trace.steps[current().tile];}
+function announce(){const f=current();$('announcement').textContent=`${phases[f.phase].name}，Query ${s.q}，K/V Tile ${f.tile+1}，共 ${model.tiles(s.q)} 块。`;}
+function setIndex(index){s.index=clamp(index,0,frames.length-1);render();announce();if(s.index===frames.length-1)pause();}
+function setPhase(phase){pause();const tile=current().tile;let at=frames.findIndex(f=>f.phase===phase&&f.tile===tile);if(at<0)at=frames.findIndex(f=>f.phase===phase);setIndex(at<0?0:at);}
+function setTile(delta){pause();const f=current(),tile=clamp(f.tile+delta,0,model.tiles(s.q)-1),phase=clamp(f.phase,2,6);const at=frames.findIndex(x=>x.tile===tile&&x.phase===phase);if(at>=0)setIndex(at);}
+function pause(){if(timer)clearInterval(timer);timer=null;s.playing=false;if($('play')){$('play').textContent='播放';$('play').setAttribute('aria-pressed','false');}}
+function play(){if(Sim.route(s.cfg).kind!=='mma')return;if(s.playing){pause();return;}if(s.index===frames.length-1)s.index=0;s.playing=true;$('play').textContent='暂停';$('play').setAttribute('aria-pressed','true');render();timer=setInterval(()=>setIndex(s.index+1),1450/s.speed);}
+function syncInputs(){for(const [id,v]of [['query-length',s.cfg.L],['context-length',s.cfg.context],['page-size',s.cfg.pageSize],['dtype',s.cfg.dtype],['head-dim',s.cfg.D]])$(id).value=v;$('context-length').min=s.cfg.L;}
+function changeConfig(){s.cfg.L=clamp(Math.round(Number($('query-length').value)||1),1,256);s.cfg.context=clamp(Math.round(Number($('context-length').value)||s.cfg.L),s.cfg.L,4096);s.cfg.pageSize=Number($('page-size').value);s.cfg.D=Number($('head-dim').value);s.cfg.dtype=$('dtype').value;s.cfg.spike=false;$('preset').value='custom';syncInputs();updateModel();}
+function selectQuery(q){const phase=current().phase,tile=current().tile;pause();s.q=clamp(Math.round(Number(q)||0),0,s.cfg.L-1);trace=model.trace(s.q,s.head,s.bad);makeFrames();const at=frames.findIndex(f=>f.phase===phase&&f.tile===Math.min(tile,model.tiles(s.q)-1));s.index=at>=0?at:0;render();}
+function applyPreset(name){pause();s.cfg={L:65,context:129,pageSize:33,D:128,dtype:'bf16',spike:false};s.q=0;s.head=0;s.key=0;s.bad=false;$('bad-scale').checked=false;if(name==='standard')s.cfg={...s.cfg,L:128,context:1024,pageSize:128};if(name==='spike'){s.cfg.spike=true;s.q=64;}if(name==='decode')s.cfg={...s.cfg,L:1,context:1024,pageSize:128};syncInputs();updateModel();if(name==='spike'){s.index=frames.findIndex(f=>f.phase===5&&f.tile===model.tiles(s.q)-1);render();}announce();}
+function blockBounds(){const start=Math.floor(s.q/64)*64;return {start,end:Math.min(start+63,s.cfg.L-1),group:Math.floor((s.q-start)/8)};}
+function sceneCaption(extra=''){const b=blockBounds();return `<div class="scene-caption"><span>Q block ${Math.floor(s.q/64)} · 行 ${b.start}…${b.end}</span><em>${extra||`Head ${s.head} → KV ${Math.floor(s.head/2)}`}</em></div>`;}
+function qScene(){const b=blockBounds();let cells='';for(let i=b.start;i<b.start+64;i++){const valid=i<s.cfg.L;cells+=`<button class="qcell ${i===s.q?'selected':''} ${Math.floor((i-b.start)/8)===b.group?'same-group':''}" data-query="${i}" ${valid?'':'disabled'} aria-label="Query ${i}${valid?'':'，尾部无效行'}" aria-pressed="${i===s.q}">${valid?i:'×'}</button>`;}return sceneCaption('256 threads / threadgroup')+`<h3>8 组线程，各接住 8 行 Q</h3><div class="tiny-label">橙色下边线是选定行所属的 SIMD group；所有索引从 0 开始。</div><div class="qgrid">${cells}</div><div class="legend"><span class="chosen">选定 Query</span><span>有效行</span><span class="invalid">尾部无效行</span></div><p class="scene-note">此配置启动 4 × ceil(${s.cfg.L}/64) = ${4*Math.ceil(s.cfg.L/64)} 个 threadgroup。</p>`;}
+function qLoadScene(){const b=blockBounds(),live=b.end-b.start+1;return sceneCaption('Device → Threadgroup')+`<div class="transfer"><div class="memory-block"><strong>Q device</strong><code>${live} × 128</code><small>本块的有效 Query</small></div><div class="drawn-arrow">→<i class="particle"></i></div><div class="memory-block active"><strong>q_tile</strong><code>64 × 130</code><small>128 维 + 2 padding</small></div></div><p class="memory-caption">Q 留在片上，后续每轮复用 ↶</p><div class="load-stripes"><span>thread 0<br>dim 0…31</span><span>thread 1<br>dim 32…63</span><span>thread 2<br>dim 64…95</span><span>thread 3<br>dim 96…127</span></div><p class="scene-note">每线程加载 32 个 BF16 元素。${live<64?`本块只有 ${live} 行有效，其余 ${64-live} 行填 0。`:'本块 64 行都有效。'} 完成后所有线程同步。</p>`;}
+function pageScene(){const st=selectedStep(),selected=st.rows[s.key],pages=[...new Set(st.rows.filter(r=>r.valid).map(r=>r.logicalPage))];let keys=st.rows.map((r,i)=>`<button class="keycell ${r.valid?'':'invalid'} ${r.valid&&r.logicalPage%2?'page-b':''} ${i===s.key?'selected':''}" data-key="${i}" aria-label="Key ${r.key}，${r.valid?'物理页 '+r.physicalPage+' 槽位 '+r.slot:'无效尾部'}" aria-pressed="${i===s.key}">${r.key}<small>${r.valid?'P'+r.physicalPage:'填 0'}</small></button>`).join('');let entries=pages.map(p=>`<div class="page-entry ${p===selected.logicalPage&&selected.valid?'active':''}"><small>逻辑页 ${p}</small><strong>→ P${model.blockTable[p]}</strong></div>`).join('');return sceneCaption(st.onePage?'同页快路径 · 查表 1 次':'跨页通用路径 · 按 Key 翻译')+`<div class="tiny-label" style="margin-bottom:9px">当前 Tile 的 32 个逻辑位置，点击任意一个查看地址。</div><div class="keygrid">${keys}</div><div class="page-table">${entries}</div><div class="address">${selected.valid?`key <b>${selected.key}</b> ÷ ${s.cfg.pageSize} → 逻辑页 <b>${selected.logicalPage}</b> → P<b>${selected.physicalPage}</b> / slot <b>${selected.slot}</b>`:`key ${selected.key} 超出当前块的加载范围 → 零填充，不访问页表`}</div><p class="scene-note">加载上限 ${st.visible}，本 Tile 有 ${st.live}/32 行需要加载。这里的“有效加载”与某一行 Query 的因果可见性分开处理。</p>`;}
+function fragmentShape(rows,cols,hot){let out='';for(let i=0;i<rows*cols;i++)out+=`<span class="frag ${hot(i)?'hot':''}"></span>`;return `<div class="fragments" style="grid-template-columns:repeat(${cols},1fr)">${out}</div>`;}
+function matrixScene(pv=false){return sceneCaption(`SIMD group ${blockBounds().group} · 8 行 Query`)+`${pv?'<div class="buffer-swap"><span>Kᵀ [128,32]</span> → <span class="now">V [32,128]</span></div>':''}<div class="matrix-flow"><div class="matrix-operand"><strong>${pv?'BF16(p)':'Q'}</strong>${fragmentShape(1,pv?4:16,i=>i===0)}<small>${pv?'[8,32] · 4 个片段':'[8,128] · 16 个片段'}</small></div><div class="matrix-sign">×</div><div class="matrix-operand"><strong>${pv?'V':'Kᵀ'}</strong>${fragmentShape(pv?4:16,pv?16:4,i=>pv?i<16:i%4===0)}<small>${pv?'[32,128]':'[128,32]'}</small></div><div class="matrix-sign">${pv?'+=':'='}</div><div class="matrix-operand"><strong>${pv?'u':'scores'}</strong>${fragmentShape(1,pv?16:4,()=>true)}<small>${pv?'[8,128] · FP32':'[8,32] · FP32'}</small></div></div><p class="math-note">每个小格是一个 8×8 片段 · ${pv?'16 输出片段 × 4 Key片段':'16 次维度归约 × 4 分数片段'} = 64 次 MMA</p>${pv?`<div class="contribution">u[0] = ${fmt(selectedStep().oldUScaled)} + ${fmt(selectedStep().weightedValue)}<br>→ <strong>${fmt(selectedStep().after.u)}</strong></div>`:'<p class="scene-note">矩阵乘法使用已经排好的共享区数据，无需再次翻译页表。只有当前分数块保留在 SIMD 矩阵片段中。</p>'}`;}
+function heatScene(){const st=selectedStep(),key=st.start+s.key,valid=key<trace.rowVisible;return sceneCaption('当前 SIMD group · 8 × 32 scores')+`<div class="mask-equation">可见：s ≤ l + S − L = <strong>${s.q+s.cfg.context-s.cfg.L}</strong></div><canvas id="heatmap" class="heatmap" role="img" aria-label="当前8行Query对32个Key的因果可见分数热图，划线位置不可见"></canvas><div class="heat-legend"><span>深浅表示 log₂ 分数 · × 表示被 mask</span><span>橙框：选定的一对 Q / K</span></div><label class="focus-key">选定 Key<input id="focus-key" type="range" min="0" max="31" value="${s.key}" aria-label="选定 Tile 内的 Key"><output>${key}</output></label><div class="address">Q <b>${s.q}</b> × K <b>${key}</b> → ${valid?`分数 <b>${fmt(model.score(s.q,s.head,key))}</b>（log₂ 单位）`:'<b>−∞</b> → 权重为 0'}</div>`;}
+function softScene(){const st=selectedStep();const bars=st.weights.map((p,i)=>`<div class="${i===s.key?'focus':''}" style="height:${Math.max(1,p*100)}%" aria-label="Key ${st.start+i} 的未归一化权重 ${fmt(p)}"></div>`).join('');return sceneCaption(st.allMasked?'选定行在本 Tile 无可见 Key':'更新选定行的 m / ℓ / u')+`<div class="alpha">α = 2^(${fmt(st.before.m)} − ${fmt(st.after.m)}) = ${fmt(st.alpha)}</div><div class="state-flow"><div class="state-column"><h4>处理本块之前</h4><dl><dt>m</dt><dd>${fmt(st.before.m)}</dd><dt>ℓ</dt><dd>${fmt(st.before.l)}</dd><dt>u₀</dt><dd>${fmt(st.before.u)}</dd></dl></div><div class="drawn-arrow">→</div><div class="state-column after"><h4>重缩放后 / PV 前</h4><dl><dt>m′</dt><dd>${fmt(st.after.m)}</dd><dt>ℓ′</dt><dd>${fmt(st.after.l)}</dd><dt>u₀</dt><dd>${fmt(st.oldUScaled)}</dd></dl></div></div><div class="rescale-formula">ℓ′ = <strong>${fmt(st.scaleApplied)}</strong> × ${fmt(st.before.l)} + ${fmt(st.weightSum)}<br>u₀ ← <strong>${fmt(st.scaleApplied)}</strong> × ${fmt(st.before.u)} = ${fmt(st.oldUScaled)}</div><div class="weight-chart" role="img" aria-label="当前32个Key的未归一化指数权重">${bars}</div><div class="weight-axis"><span>K ${st.start}</span><span>当前 p = 2^(x − m′)，不是最终概率</span><span>${st.start+31}</span></div>${s.bad?'<p class="warning">错误实验已开启：上式故意把历史缩放设为 1。</p>':''}<p class="scene-note">此时 ℓ 已更新，u 只完成历史重缩放。下一步计算 PV，再加入当前 Tile 的贡献。</p>`;}
+function resultScene(){const max=Math.max(...trace.steps.map(x=>Math.abs(x.after.l)),1);return sceneCaption('所有可见 K/V Tile 已处理')+`<div class="result-sum"><p>O[0] = BF16(u[0] / ℓ)</p><div class="result-number">${fmt(trace.outputBF16,6)}</div><p>${fmt(trace.steps.at(-1).after.u)} / ${fmt(trace.steps.at(-1).after.l)}</p></div><div class="mini-bars" style="gap:${trace.steps.length>32?1:6}px" aria-label="每个Tile处理后的指数和">${trace.steps.map((t,i)=>`<div class="done" data-i="${i%Math.ceil(trace.steps.length/8)===0||i===trace.steps.length-1?i:''}" style="height:${Math.max(5,t.after.l/max*100)}%"></div>`).join('')}</div><div class="result-compare"><div><span>完整 Attention 参考 · 第 0 维</span><strong>${fmt(trace.reference,7)}</strong></div><div><span>最终 BF16 输出的绝对差</span><strong>${fmt(trace.error,7)}</strong></div></div><p class="scene-note">参考值使用相同合成数据的完整 FP64 Softmax；小差异来自 FP32 累积与 BF16 中间舍入。${s.bad?'当前错误实验结果不能代表真实内核。':''}</p>`;}
+function fallbackScene(route){const isDecode=route.kind==='decode';return `<div class="fallback"><div class="kicker">实际分发到 ${isDecode?'DAY 4 DECODE':'GENERIC PREFILL'}</div><h3>${isDecode?'历史再长，一行 Q 仍走 Decode':'这个形状保留通用路径'}</h3><p>${route.reason}</p><div class="fallback-flow"><span>${isDecode?'一行 / 短 Query':'通用 Query 形状'}</span><b>→</b><span>${isDecode?'32 SIMD groups 分担上下文':'标量分页计算'}</span><b>→</b><span>合并并输出</span></div><div class="route-name">${route.name}</div><p>将 L 设为 9 以上、dtype 设为 BF16、D 设为 128，进入 Day 5 推演。</p></div>`;}
+function stateAtFrame(){const f=current(),st=selectedStep();if(f.phase<2)return {m:-Infinity,l:0,u:0};if(f.phase<5)return st.before;if(f.phase===5)return {m:st.after.m,l:st.after.l,u:st.oldUScaled};return st.after;}
+function render(){const route=Sim.route(s.cfg),mma=route.kind==='mma',f=current(),p=phases[f.phase],b=blockBounds();$('routebar').innerHTML=`<span class="route-tag ${mma?'':'other'}">${mma?'DAY 5 · MMA':route.kind==='decode'?'DAY 4 · DECODE':'GENERIC · SCALAR'}</span><span class="route-name">${route.name}</span><span class="dot-separator">·</span><span>L=${s.cfg.L} / S=${s.cfg.context} / page=${s.cfg.pageSize}</span>`;$('steps').innerHTML=phases.map((x,i)=>`<button class="step ${i===f.phase&&mma?'active':''}" data-phase="${i}" ${mma?'':'disabled'} aria-current="${i===f.phase&&mma?'step':'false'}"><span class="number">${i+1}</span><span><strong>${x.name}</strong><small>${x.sub}</small></span></button>`).join('');$('stage-kicker').textContent=mma?`STEP ${f.phase+1} / 8 · ${p.sub.toUpperCase()}`:'SHAPE DISPATCH';$('stage-title').textContent=mma?p.title:'先看当前形状走哪里';$('tile-label').textContent=mma?`Tile ${f.tile+1}/${model.tiles(s.q)}`:'—';$('tile-prev').disabled=!mma||f.tile===0;$('tile-next').disabled=!mma||f.tile===model.tiles(s.q)-1;$('prev').disabled=!mma||s.index===0;$('next').disabled=!mma||s.index===frames.length-1;$('play').disabled=!mma;$('timeline').disabled=!mma;$('timeline').max=frames.length-1;$('timeline').value=s.index;$('frame-label').textContent=mma?`帧 ${s.index+1} / ${frames.length}`:'Day 5 播放已暂停';$('frame-total').textContent=mma?`${model.tiles(s.q)} 个 K/V Tile`:'查看路由条件';$('lesson').innerHTML=mma?p.lesson:'分发条件读取本次 Query 长度 L，不读取“历史是否很长”来选择 Prefill 内核。';const sceneKey=[mma,f.phase,f.tile,s.q,s.head,s.key,s.bad,s.cfg.L,s.cfg.context,s.cfg.pageSize,s.cfg.spike,route.name].join(':');if(sceneKey!==lastScene){const html=!mma?fallbackScene(route):[qScene,qLoadScene,pageScene,()=>matrixScene(false),heatScene,softScene,()=>matrixScene(true),resultScene][f.phase]();$('scene').innerHTML=html;$('scene').classList.remove('reveal');void $('scene').offsetWidth;$('scene').classList.add('reveal');lastScene=sceneKey;}const state=stateAtFrame();$('selected-query').max=s.cfg.L-1;$('selected-query').value=s.q;$('selected-head').value=s.head;$('query-range').max=s.cfg.L-1;$('query-range').value=s.q;$('query-meta').innerHTML=`绝对位置 <b>${s.q+s.cfg.context-s.cfg.L}</b> · KV Head ${Math.floor(s.head/2)}<br>可见 Key 0…${trace.rowVisible-1}<br>Q block ${Math.floor(s.q/64)} · SIMD group ${b.group}`;$('value-m').textContent=mma?fmt(state.m):'—';$('value-l').textContent=mma?fmt(state.l):'—';$('value-u').textContent=mma?fmt(state.u):'—';$('state-heading').textContent=!mma?'当前未执行 Day 5':f.phase<2?'初始状态':f.phase<5?'进入本 Tile 前':f.phase===5?'重缩放后 / PV 前':f.phase===7?'写回前的最终状态':'合并本 Tile 后';$('state-caption').textContent=mma?(f.phase===5?'ℓ 已更新，u 仅缩放历史部分；下一步加入 PV。':'ℓ 与 u 为 FP32 教学近似。'):'选择支持的形状后恢复逐帧计算。';$('bad-scale').disabled=!mma;$('warning').hidden=!s.bad||!mma;$('experiment-label').classList.toggle('active',s.bad&&mma);$('code-file').textContent=mma?`教学伪代码 · 对应 ${f.phase===0?'C++ 分发 / Metal 线程分工':'paged_attention.metal · '+p.line}`:'教学伪代码 · 对应 paged_attention.cpp 分发';$('code').textContent=mma?p.code:'if (L <= 8)\n  dispatch(paged_attention_decode);\nelse if (dtype == BF16 && D == 128)\n  dispatch(paged_attention_mma_bf16_d128);\nelse\n  dispatch(paged_attention_scalar);';$('play').textContent=s.playing?'暂停':'播放';$('play').setAttribute('aria-pressed',String(s.playing));renderLanes();requestAnimationFrame(drawHeatmap);}
+function renderLanes(){$('lane-grid').innerHTML=Array.from({length:32},(_,i)=>`<button class="lane-btn ${i===s.lane?'active':''}" data-lane="${i}" aria-pressed="${i===s.lane}" aria-label="lane ${i}">${i}</button>`).join('');const c=Sim.laneCoord(s.lane);$('fragment-grid').innerHTML=Array.from({length:64},(_,i)=>`<span class="fragment-cell ${Math.floor(i/8)===c.y&&(i%8===c.x||i%8===c.x+1)?'selected':''}"></span>`).join('');$('lane-detail').innerHTML=`lane <strong>${s.lane}</strong><br>行 <strong>${c.y}</strong>，列 <strong>${c.x}、${c.x+1}</strong><br>一行由 4 个 lane 共同持有。\nxor 1 / xor 8 只合并同一行。`;}
+function drawHeatmap(){const canvas=$('heatmap');if(!canvas)return;const width=Math.round(canvas.getBoundingClientRect().width);if(!width)return;const height=width<430?245:265,dpr=window.devicePixelRatio||1;canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);const left=43,top=22,bottom=32,right=5,cw=(width-left-right)/32,ch=(height-top-bottom)/8;const groupStart=Math.floor(s.q/8)*8,st=selectedStep();let min=Infinity,max=-Infinity;for(let r=0;r<8;r++){let q=groupStart+r;if(q>=s.cfg.L)continue;for(let k=0;k<32;k++){const key=st.start+k;if(key<q+s.cfg.context-s.cfg.L+1){const x=model.score(q,s.head,key);min=Math.min(min,x);max=Math.max(max,x);}}}if(!Number.isFinite(min)){min=0;max=1;}ctx.font='11px -apple-system, sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';for(let r=0;r<8;r++){const q=groupStart+r;ctx.fillStyle=q===s.q?'#dc651e':'#64788a';ctx.textAlign='right';ctx.fillText(q<s.cfg.L?'Q'+q:'尾行',left-7,top+r*ch+ch/2);ctx.textAlign='center';for(let k=0;k<32;k++){const key=st.start+k,valid=q<s.cfg.L&&key<q+s.cfg.context-s.cfg.L+1;const x=valid?model.score(q,s.head,key):0;const t=valid?(x-min)/(max-min||1):0;ctx.fillStyle=valid?`rgba(25,54,84,${.1+.7*t})`:'#eeefeb';ctx.fillRect(left+k*cw+1,top+r*ch+1,Math.max(1,cw-2),ch-2);if(!valid){ctx.strokeStyle='#b6bfc3';ctx.lineWidth=.7;ctx.beginPath();ctx.moveTo(left+k*cw+cw*.3,top+r*ch+ch*.34);ctx.lineTo(left+k*cw+cw*.7,top+r*ch+ch*.66);ctx.moveTo(left+k*cw+cw*.7,top+r*ch+ch*.34);ctx.lineTo(left+k*cw+cw*.3,top+r*ch+ch*.66);ctx.stroke();}if(q===s.q&&k===s.key){ctx.strokeStyle='#dc651e';ctx.lineWidth=2;ctx.strokeRect(left+k*cw+.5,top+r*ch+.5,cw-1,ch-1);}}}ctx.fillStyle='#64788a';const tickStep=width<430?8:4;for(let k=0;k<32;k+=tickStep)ctx.fillText(String(st.start+k),left+(k+.5)*cw,top-9);ctx.fillText('Key 逻辑位置',left+(width-left-right)/2,height-10);canvas.onclick=e=>{const rect=canvas.getBoundingClientRect(),key=clamp(Math.floor((e.clientX-rect.left-left)/cw),0,31),row=clamp(Math.floor((e.clientY-rect.top-top)/ch),0,7);s.key=key;const q=groupStart+row;if(q<s.cfg.L)selectQuery(q);else render();};}
+for(const id of ['query-length','context-length','page-size','dtype','head-dim'])$(id).addEventListener('change',changeConfig);
+$('preset').addEventListener('change',e=>applyPreset(e.target.value));$('selected-query').addEventListener('change',e=>selectQuery(e.target.value));$('query-range').addEventListener('input',e=>selectQuery(e.target.value));$('selected-head').addEventListener('change',e=>{pause();s.head=Number(e.target.value);trace=model.trace(s.q,s.head,s.bad);render();});$('bad-scale').addEventListener('change',e=>{pause();s.bad=e.target.checked;trace=model.trace(s.q,s.head,s.bad);render();});$('steps').addEventListener('click',e=>{const b=e.target.closest('[data-phase]');if(b&&!b.disabled)setPhase(Number(b.dataset.phase));});$('scene').addEventListener('click',e=>{const q=e.target.closest('[data-query]');if(q&&!q.disabled)selectQuery(Number(q.dataset.query));const key=e.target.closest('[data-key]');if(key){s.key=Number(key.dataset.key);render();}});$('scene').addEventListener('input',e=>{if(e.target.id==='focus-key'){s.key=Number(e.target.value);render();}});$('lane-grid').addEventListener('click',e=>{const b=e.target.closest('[data-lane]');if(b){s.lane=Number(b.dataset.lane);renderLanes();}});$('prev').addEventListener('click',()=>{pause();setIndex(s.index-1);});$('next').addEventListener('click',()=>{pause();setIndex(s.index+1);});$('play').addEventListener('click',play);$('tile-prev').addEventListener('click',()=>setTile(-1));$('tile-next').addEventListener('click',()=>setTile(1));$('timeline').addEventListener('input',e=>{pause();setIndex(Number(e.target.value));});$('speed').addEventListener('change',e=>{const running=s.playing;pause();s.speed=Number(e.target.value);if(running)play();});for(const tab of ['code','thread'])$('tab-'+tab).addEventListener('click',()=>{s.tab=tab;for(const t of ['code','thread']){$('tab-'+t).setAttribute('aria-selected',String(t===tab));$(t+'-panel').hidden=t!==tab;}});document.addEventListener('keydown',e=>{if(['INPUT','SELECT','TEXTAREA','BUTTON'].includes(e.target.tagName))return;if(Sim.route(s.cfg).kind!=='mma')return;if(e.key==='ArrowRight'){e.preventDefault();pause();setIndex(s.index+1);}if(e.key==='ArrowLeft'){e.preventDefault();pause();setIndex(s.index-1);}if(e.code==='Space'){e.preventDefault();play();}});window.addEventListener('resize',drawHeatmap);window.addEventListener('pagehide',pause);
+window.Day5App={getState:()=>JSON.parse(JSON.stringify({...s,frame:current(),frameCount:frames.length,route:Sim.route(s.cfg),result:trace?{output:trace.outputBF16,reference:trace.reference,error:trace.error}:null})),selectPhase:setPhase};
+syncInputs();updateModel();
+})();
+</script>
+</body>
+</html>
