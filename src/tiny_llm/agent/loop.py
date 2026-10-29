@@ -11,14 +11,19 @@ Implement the bodies yourself; use the Day 1 chapter and public tests as the
 learner contract.
 """
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from .checkpoint import AgentCheckpoint
-from .generation import Generate, Message
+from .generation import Generate, Message, initial_messages
 from .protocol import (
     AgentAction,
+    AgentError,
+    FinalAction,
+    build_system_prompt,
+    parse_action,
 )
 
 
@@ -34,8 +39,16 @@ class AgentLimits:
     def __post_init__(self) -> None:
         """Reject budgets that could disable a stop condition."""
 
-        # TODO: reject any non-positive budget.
-        pass
+        if (
+            min(
+                self.max_steps,
+                self.max_context_chars,
+                self.max_invalid_actions,
+                self.max_identical_actions,
+            )
+            <= 0
+        ):
+            raise ValueError("agent limits must be positive")
 
 
 @dataclass(frozen=True)
@@ -64,8 +77,11 @@ def _append_tool_result(
 ) -> list[Message]:
     """Append one assistant response and its tool observation."""
 
-    # TODO: append assistant + "Tool result: ..." user messages.
-    pass
+    return [
+        *messages,
+        {"role": "assistant", "content": response},
+        {"role": "user", "content": f"Tool result:\n{result}"},
+    ]
 
 
 def run_agent(
@@ -82,13 +98,69 @@ def run_agent(
     (an iterable of paths).
     """
 
-    # TODO: reject an empty task; build the system prompt and initial
-    # messages; loop up to max_steps; parse each response with
-    # parse_action(response, workspace.available_tools); feed invalid
-    # actions back as "error: ..." observations; stop on FinalAction,
-    # invalid-action limit, identical-action limit, context limit, and step
-    # limit.
-    pass
+    if task is None or not task.strip():
+        raise ValueError("task must not be empty")
+    messages = initial_messages(task, build_system_prompt(workspace))
+    limits = limits or AgentLimits()
+    events: list[AgentEvent] = []
+    invalid_actions = 0
+    previous_signature: str | None = None
+    identical_actions = 0
+
+    for step in range(1, limits.max_steps + 1):
+        if (
+            sum(len(message["content"]) for message in messages)
+            > limits.max_context_chars
+        ):
+            return AgentRun(False, "context_limit", None, tuple(events))
+        response = generate(messages)
+        try:
+            action = parse_action(response, workspace.available_tools)
+        except AgentError as error:
+            invalid_actions += 1
+            previous_signature = None
+            identical_actions = 0
+            result = f"error: {error}"
+            event = AgentEvent(step, response, None, result)
+            events.append(event)
+            if on_event is not None:
+                on_event(event)
+            if invalid_actions >= limits.max_invalid_actions:
+                return AgentRun(False, "invalid_action_limit", None, tuple(events))
+            messages = _append_tool_result(messages, response, result)
+            continue
+
+        if isinstance(action, FinalAction):
+            event = AgentEvent(step, response, action, None)
+            events.append(event)
+            if on_event is not None:
+                on_event(event)
+            return AgentRun(True, "completed", action.final, tuple(events))
+
+        signature = json.dumps(
+            {"tool": action.tool, "arguments": action.arguments}, sort_keys=True
+        )
+        if signature == previous_signature:
+            identical_actions += 1
+        else:
+            previous_signature = signature
+            identical_actions = 1
+        if identical_actions > limits.max_identical_actions:
+            result = "error: identical action loop detected"
+            event = AgentEvent(step, response, action, result)
+            events.append(event)
+            if on_event is not None:
+                on_event(event)
+            return AgentRun(False, "repeated_action_limit", None, tuple(events))
+
+        result = workspace.execute(action)
+        event = AgentEvent(step, response, action, result)
+        events.append(event)
+        if on_event is not None:
+            on_event(event)
+        messages = _append_tool_result(messages, response, result)
+
+    return AgentRun(False, "step_limit", None, tuple(events))
 
 
 def run_to_checkpoint(

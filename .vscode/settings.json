@@ -3,5 +3,8 @@
     "python.defaultInterpreterPath": "/Users/qxw/.codex/worktrees/2739/tiny-llm/.venv/bin/python",
     "python.analysis.extraPaths": [
     "/Users/qxw/.codex/worktrees/2739/tiny-llm/src"
+  ],
+  "cursorpyright.analysis.extraPaths": [
+    "/Users/qxw/.codex/worktrees/2739/tiny-llm/src"
   ]
 }

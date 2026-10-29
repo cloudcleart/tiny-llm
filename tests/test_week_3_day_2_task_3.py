@@ -81,9 +81,9 @@ def test_task_3_paged_cache_evaluates_pool_without_dense_gather(monkeypatch):
     monkeypatch.setattr(mx, "eval", lambda *arrays: calls.append(arrays))
     cache.materialize()
     assert calls == []
-    # Supply page storage directly; allocation belongs to Week 3 Day 3.
-    pool.key_pages = mx.ones((2, 1, 4, 8))
-    pool.value_pages = mx.zeros((2, 1, 4, 8))
+    # Since Day 3, public pool pages are read-only views; initialize them through real writes.
+    # Use the paged interface so fixture setup does not trigger a dense gather.
+    cache.update_and_fetch_paged(mx.ones((1, 1, 5, 8)), mx.zeros((1, 1, 5, 8)))
 
     def reject_gather():
         pytest.fail("materialize must not gather dense K/V")
@@ -91,5 +91,8 @@ def test_task_3_paged_cache_evaluates_pool_without_dense_gather(monkeypatch):
     monkeypatch.setattr(cache, "gather_dense", reject_gather)
     cache.materialize()
     assert len(calls) == 1
-    assert calls[0][0] is pool.key_pages
-    assert calls[0][1] is pool.value_pages
+    # Each property access returns a new view; object identity cannot verify the underlying data.
+    assert calls[0][0].shape == calls[0][1].shape == (2, 1, 4, 8)
+    monkeypatch.undo()
+    assert mx.array_equal(calls[0][0], pool.key_pages).item()
+    assert mx.array_equal(calls[0][1], pool.value_pages).item()

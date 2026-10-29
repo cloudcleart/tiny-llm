@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,10 +44,77 @@ def parse_action(
 ) -> AgentAction:
     """Week 4, Day 1: strictly parse and validate exactly one JSON action."""
 
-    pass
+    try:
+        raw = json.loads(response)
+    except json.JSONDecodeError as error:
+        raise AgentError(f"invalid JSON: {error.msg}") from error
+    if not isinstance(raw, dict):
+        raise AgentError("action must be a JSON object")
+    if "final" in raw:
+        if set(raw) != {"final"}:
+            raise AgentError("final action must contain only final")
+        if not isinstance(raw["final"], str) or not raw["final"].strip():
+            raise AgentError("final must be a non-empty string")
+        return FinalAction(raw["final"])
+
+    tool = raw.get("tool")
+    if not isinstance(tool, str) or tool not in TOOL_FIELDS:
+        raise AgentError(f"unknown tool: {tool}")
+    if available_tools is not None and tool not in available_tools:
+        raise AgentError(f"tool not enabled: {tool}")
+    required, optional = TOOL_FIELDS[tool]
+    supplied = set(raw) - {"tool"}
+    missing = required - supplied
+    extra = supplied - required - optional
+    if missing:
+        raise AgentError(f"missing fields: {', '.join(sorted(missing))}")
+    if extra:
+        raise AgentError(f"unexpected fields: {', '.join(sorted(extra))}")
+    arguments = {name: value for name, value in raw.items() if name != "tool"}
+    for name, value in arguments.items():
+        if name == "argv":
+            if (
+                not isinstance(value, list)
+                or not value
+                or any(not isinstance(part, str) or not part for part in value)
+            ):
+                raise AgentError("argv must be a non-empty array of non-empty strings")
+        elif not isinstance(value, str):
+            raise AgentError(f"{name} must be a string")
+    return ToolAction(tool, arguments)
 
 
 def build_system_prompt(workspace: Any) -> str:
     """Week 4, Day 1: describe only the tools authorized for this run."""
 
-    pass
+    lines = [
+        "You are a coding agent. Inspect the workspace before editing it.",
+        "Reply with exactly one JSON object and no markdown.",
+        'Finish with: {"final":"brief summary"}',
+        "Available actions:",
+    ]
+    tools = workspace.available_tools
+    if "list_files" in tools:
+        lines.append('{"tool":"list_files","path":"."}')
+    if "read_file" in tools:
+        lines.append('{"tool":"read_file","path":"README.md"}')
+    if "write_file" in tools:
+        lines.append('{"tool":"write_file","path":"hello.py","content":"..."}')
+    if "edit_file" in tools:
+        lines.append('{"tool":"edit_file","path":"hello.py","old":"...","new":"..."}')
+    if "run_command" in tools:
+        lines.append('{"tool":"run_command","argv":["exact","arguments"]}')
+    if "write_file" in tools or "edit_file" in tools:
+        lines.append("Read an existing file before changing it.")
+    if "run_command" in tools and workspace.policy.allowed_commands:
+        lines.append("The operator allowed only these exact command arrays:")
+        lines.extend(
+            json.dumps(list(command)) for command in workspace.policy.allowed_commands
+        )
+    lines.extend(
+        [
+            "Paths must be relative to the workspace.",
+            "Keep changes small and never invent file contents.",
+        ]
+    )
+    return "\n".join(lines)
