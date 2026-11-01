@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .protocol import ToolAction
+from .protocol import AgentError, ToolAction
 from .receipts import ReceiptStore
 
 
@@ -37,8 +37,24 @@ class ToolPolicy:
     command_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
-        # TODO: normalize and validate the root and positive limits.
-        pass
+        root = Path(self.root)
+        # Check before resolving, which would hide a symlink root.
+        if root.is_symlink():
+            raise ValueError("workspace root must not be a symlink")
+        root = root.resolve()
+        if not root.exists():
+            raise ValueError("workspace root must exist")
+        if not root.is_dir():
+            raise ValueError("workspace root must be a directory")
+
+        for name in ("max_file_bytes", "max_list_entries"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("workspace limits must be positive integers")
+            if value <= 0:
+                raise ValueError("workspace limits must be positive")
+
+        object.__setattr__(self, "root", root)
 
 
 @dataclass
@@ -56,28 +72,106 @@ class Workspace:
     def available_tools(self) -> frozenset[str]:
         """Return only the tools enabled by this policy."""
 
-        pass
+        return frozenset({"list_files", "read_file"})
 
     @property
     def modified_files(self) -> tuple[str, ...]:
         """Return the files changed by this workspace in sorted order."""
 
-        pass
+        return tuple(sorted(self._modified))
 
     def resolve_path(self, raw: str, *, must_exist: bool = True) -> Path:
         """Resolve one relative path without traversal or symlinks."""
 
-        pass
+        if not isinstance(raw, str) or not raw.strip() or "\0" in raw:
+            raise AgentError("path must be a non-empty relative path")
+        relative = Path(raw)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise AgentError("absolute paths and parent traversal are not allowed")
+
+        protected = {
+            ".git",
+            ".env",
+            ".ssh",
+            ".aws",
+            ".netrc",
+            ".npmrc",
+            "credentials",
+            "credentials.json",
+            "id_rsa",
+            "id_dsa",
+            "id_ecdsa",
+            "id_ed25519",
+        }
+        current = self.policy.root
+        try:
+            for part in relative.parts:
+                name = part.lower()
+                if (
+                    name in protected
+                    or name.startswith(".env.")
+                    or name.endswith((".pem", ".key", ".p12", ".pfx"))
+                ):
+                    raise AgentError(f"protected path: {raw}")
+                current = current / part
+                if current.is_symlink():
+                    raise AgentError(f"symlinks are not allowed: {raw}")
+            resolved = current.resolve(strict=must_exist)
+            resolved.relative_to(self.policy.root)
+        except AgentError:
+            raise
+        except (OSError, RuntimeError, ValueError) as error:
+            raise AgentError(f"invalid workspace path: {raw}: {error}") from error
+        return resolved
 
     def list_files(self, raw: str = ".") -> str:
         """List one directory, bounded by the policy."""
 
-        pass
+        directory = self.resolve_path(raw)
+        lines = []
+        try:
+            if not directory.is_dir():
+                raise AgentError(f"path must be a directory: {raw}")
+            for entry in sorted(directory.iterdir(), key=lambda path: path.name):
+                relative = entry.relative_to(self.policy.root).as_posix()
+                try:
+                    visible = self.resolve_path(relative)
+                except AgentError:
+                    continue
+                if visible.is_file():
+                    kind = "file"
+                elif visible.is_dir():
+                    kind = "dir"
+                else:
+                    continue
+                lines.append(f"{kind} {relative}")
+                if len(lines) >= self.policy.max_list_entries:
+                    break
+        except OSError as error:
+            raise AgentError(f"cannot list directory: {raw}: {error}") from error
+        return "\n".join(lines) if lines else "(empty directory)"
 
     def read_file(self, raw: str) -> str:
         """Read one bounded UTF-8 regular file."""
 
-        pass
+        path = self.resolve_path(raw)
+        limit = self.policy.max_file_bytes
+        try:
+            if not path.is_file():
+                raise AgentError(f"path must be a regular file: {raw}")
+            if path.stat().st_size > limit:
+                raise AgentError(f"file exceeds {limit} bytes: {raw}")
+            # Bound the read even if the file grows after the size check.
+            with path.open("rb") as stream:
+                data = stream.read(limit + 1)
+        except OSError as error:
+            raise AgentError(f"cannot read file: {raw}: {error}") from error
+        if len(data) > limit:
+            raise AgentError(f"file exceeds {limit} bytes: {raw}")
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise AgentError(f"file must contain valid UTF-8: {raw}") from error
 
     def write_file(self, raw: str, content: str) -> str:
         """Atomically create a file or replace one previously read unchanged."""
@@ -95,6 +189,13 @@ class Workspace:
         pass
 
     def execute(self, action: ToolAction, tool_call_id: str | None = None) -> str:
-        """Dispatch one action, approving and receipting effects once."""
+        """Dispatch a Day 2 read-only action and return recoverable errors."""
 
-        pass
+        try:
+            if action.tool not in self.available_tools:
+                raise AgentError(f"tool is not enabled: {action.tool}")
+            if action.tool == "list_files":
+                return self.list_files(action.arguments.get("path", "."))
+            return self.read_file(action.arguments["path"])
+        except (AgentError, KeyError, TypeError) as error:
+            return f"error: {error}"
