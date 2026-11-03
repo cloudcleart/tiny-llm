@@ -4,12 +4,18 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import math
+import os
+import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .protocol import AgentError, ToolAction
-from .receipts import ReceiptStore
+from .receipts import EffectReceipt, ReceiptStore
 
 
 @dataclass(frozen=True)
@@ -47,12 +53,37 @@ class ToolPolicy:
         if not root.is_dir():
             raise ValueError("workspace root must be a directory")
 
-        for name in ("max_file_bytes", "max_list_entries"):
+        for name in ("max_file_bytes", "max_list_entries", "max_write_bytes"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError("workspace limits must be positive integers")
             if value <= 0:
                 raise ValueError("workspace limits must be positive")
+
+        if not isinstance(self.allow_writes, bool):
+            raise ValueError("allow_writes must be a boolean")
+
+        timeout = self.command_timeout_seconds
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
+            raise ValueError("command timeout must be finite and positive")
+
+        if not isinstance(self.allowed_commands, tuple):
+            raise ValueError("allowed commands must be a tuple of argument tuples")
+        for command in self.allowed_commands:
+            if not isinstance(command, tuple) or not command:
+                raise ValueError("allowed commands must be non-empty argument tuples")
+            if any(
+                not isinstance(part, str) or not part or "\0" in part
+                for part in command
+            ):
+                raise ValueError(
+                    "allowed commands must contain non-empty strings without NUL"
+                )
 
         object.__setattr__(self, "root", root)
 
@@ -72,7 +103,12 @@ class Workspace:
     def available_tools(self) -> frozenset[str]:
         """Return only the tools enabled by this policy."""
 
-        return frozenset({"list_files", "read_file"})
+        tools = {"list_files", "read_file"}
+        if self.policy.allow_writes:
+            tools.update({"write_file", "edit_file"})
+        if self.policy.allowed_commands:
+            tools.add("run_command")
+        return frozenset(tools)
 
     @property
     def modified_files(self) -> tuple[str, ...]:
@@ -169,33 +205,246 @@ class Workspace:
         if len(data) > limit:
             raise AgentError(f"file exceeds {limit} bytes: {raw}")
         try:
-            return data.decode("utf-8")
+            content = data.decode("utf-8")
         except UnicodeDecodeError as error:
             raise AgentError(f"file must contain valid UTF-8: {raw}") from error
+        self._observed[path.relative_to(self.policy.root).as_posix()] = hashlib.sha256(
+            data
+        ).hexdigest()
+        return content
+
+    def _mutation_path(self, raw: str) -> Path:
+        """Validate a destination without creating it or refreshing observations."""
+
+        if not self.policy.allow_writes:
+            raise AgentError("writes are not enabled")
+        path = self.resolve_path(raw, must_exist=False)
+        if not path.parent.is_dir():
+            raise AgentError("parent directory must already exist")
+        if path.exists():
+            if not path.is_file():
+                raise AgentError(f"path must be a regular file: {raw}")
+            relative = path.relative_to(self.policy.root).as_posix()
+            if relative not in self._observed:
+                raise AgentError("read the existing file before changing it")
+        return path
+
+    def _write_bytes(self, content: str) -> bytes:
+        """Encode and bound the proposed contents before approval."""
+
+        if not isinstance(content, str):
+            raise AgentError("content must be a string")
+        try:
+            data = content.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise AgentError("content must contain valid UTF-8") from error
+        if len(data) > self.policy.max_write_bytes:
+            raise AgentError(f"write exceeds {self.policy.max_write_bytes} bytes")
+        return data
+
+    def _prepare_write(self, raw: str, content: str) -> tuple[Path, bytes]:
+        """Validate a whole-file proposal without changing the workspace."""
+
+        return self._mutation_path(raw), self._write_bytes(content)
+
+    def _prepare_edit(self, raw: str, old: str, new: str) -> tuple[Path, bytes]:
+        """Validate an exact replacement and compute its proposed bytes."""
+
+        path = self._mutation_path(raw)
+        if not isinstance(old, str) or not old:
+            raise AgentError("old must be a non-empty string")
+        if not isinstance(new, str):
+            raise AgentError("new must be a string")
+        if not path.is_file():
+            raise AgentError("read the existing file before changing it")
+        try:
+            with path.open("rb") as stream:
+                data = stream.read(self.policy.max_file_bytes + 1)
+        except OSError as error:
+            raise AgentError(f"cannot read file: {raw}: {error}") from error
+        if len(data) > self.policy.max_file_bytes:
+            raise AgentError(f"file exceeds {self.policy.max_file_bytes} bytes: {raw}")
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise AgentError(f"file must contain valid UTF-8: {raw}") from error
+        if content.count(old) != 1:
+            raise AgentError("old must occur exactly once")
+        return path, self._write_bytes(content.replace(old, new, 1))
+
+    def _approve(self, action: ToolAction) -> None:
+        """Request approval once; only the boolean True permits an effect."""
+
+        if self.confirm_tool is None:
+            raise AgentError("operator denied")
+
+        approved = self.confirm_tool(action)
+        if approved is not True:
+            raise AgentError("operator denied")
+
+    def _replace(self, raw: str, proposed: bytes, expected: str | None) -> str:
+        """Recheck the pre-approval observation and atomically replace the file."""
+
+        # Revalidate the path and bytes after the operator has decided. Do not
+        # use read_file here: it would overwrite the original observation.
+        path = self.resolve_path(raw, must_exist=False)
+        if expected is None:
+            if path.exists():
+                raise AgentError("file changed since it was read")
+        else:
+            try:
+                with path.open("rb") as stream:
+                    current = stream.read(self.policy.max_file_bytes + 1)
+            except FileNotFoundError as error:
+                raise AgentError("file changed since it was read") from error
+            except OSError as error:
+                raise AgentError(f"cannot read file: {raw}: {error}") from error
+            if (
+                len(current) > self.policy.max_file_bytes
+                or hashlib.sha256(current).hexdigest() != expected
+            ):
+                raise AgentError("file changed since it was read")
+        relative = path.relative_to(self.policy.root).as_posix()
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=path.parent, prefix=".agent-", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                stream.write(proposed)
+            os.replace(temporary, path)
+        except OSError as error:
+            raise AgentError(f"cannot replace file: {raw}: {error}") from error
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        self._modified.add(relative)
+        self._observed[relative] = hashlib.sha256(proposed).hexdigest()
+        return relative
 
     def write_file(self, raw: str, content: str) -> str:
-        """Atomically create a file or replace one previously read unchanged."""
+        """Approve and atomically create or replace a previously observed file."""
 
-        pass
+        path, proposed = self._prepare_write(raw, content)
+        action = ToolAction("write_file", {"path": raw, "content": content})
+        relative = path.relative_to(self.policy.root).as_posix()
+        expected = self._observed.get(relative) if path.exists() else None
+        self._approve(action)
+        relative = self._replace(raw, proposed, expected)
+        return f"wrote {relative}"
 
     def edit_file(self, raw: str, old: str, new: str) -> str:
-        """Replace one exact occurrence in a previously read unchanged file."""
+        """Approve and atomically replace one exact occurrence."""
 
-        pass
+        path, proposed = self._prepare_edit(raw, old, new)
+        action = ToolAction("edit_file", {"path": raw, "old": old, "new": new})
+        relative = path.relative_to(self.policy.root).as_posix()
+        expected = self._observed.get(relative) if path.exists() else None
+        self._approve(action)
+        relative = self._replace(raw, proposed, expected)
+        return f"edited {relative}"
 
     def run_command(self, argv: list[str]) -> str:
         """Run one exact allowed argument vector without a shell."""
 
-        pass
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or any(
+                not isinstance(part, str) or not part or "\0" in part for part in argv
+            )
+        ):
+            raise AgentError("argv must contain non-empty strings without NUL")
+        # Snapshot the approved command so a callback cannot mutate what runs.
+        command = tuple(argv)
+        if command not in self.policy.allowed_commands:
+            raise AgentError("command is not allowed")
+        self._approve(ToolAction("run_command", {"argv": list(command)}))
+        try:
+            completed = subprocess.run(
+                list(command),
+                shell=False,
+                cwd=self.policy.root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.policy.command_timeout_seconds,
+            )
+            status = str(completed.returncode)
+            stdout, stderr = completed.stdout, completed.stderr
+        except subprocess.TimeoutExpired as error:
+            status = "timeout"
+            stdout, stderr = error.stdout, error.stderr
+        except OSError as error:
+            raise AgentError(f"cannot run command: {error}") from error
+        return self._command_result(status, stdout, stderr)
+
+    def _command_result(
+        self, status: str, stdout: str | bytes | None, stderr: str | bytes | None
+    ) -> str:
+        """Bound combined output, including byte output captured on timeout."""
+
+        parts = []
+        for output in (stdout, stderr):
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            parts.append(output or "")
+        output = "".join(parts).encode("utf-8")
+        limit = self.policy.max_file_bytes
+        output = output[:limit].decode("utf-8", errors="ignore")
+        return f"status: {status}\noutput:\n{output}"
 
     def execute(self, action: ToolAction, tool_call_id: str | None = None) -> str:
-        """Dispatch a Day 2 read-only action and return recoverable errors."""
+        """Dispatch tools and return recoverable errors."""
 
         try:
             if action.tool not in self.available_tools:
                 raise AgentError(f"tool is not enabled: {action.tool}")
             if action.tool == "list_files":
                 return self.list_files(action.arguments.get("path", "."))
-            return self.read_file(action.arguments["path"])
+            if action.tool == "read_file":
+                return self.read_file(action.arguments["path"])
+            if tool_call_id is None:
+                tool_call_id = f"call-{self._next_call_number}"
+                self._next_call_number += 1
+                while self.receipt_store.get(tool_call_id) is not None:
+                    tool_call_id = f"call-{self._next_call_number}"
+                    self._next_call_number += 1
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                raise AgentError("tool call id must be a non-empty string")
+            previous = self.receipt_store.get(tool_call_id)
+            if previous is not None:
+                if (
+                    previous.tool != action.tool
+                    or previous.arguments != action.arguments
+                ):
+                    raise AgentError("tool call id already used")
+                return previous.result
+            arguments = copy.deepcopy(action.arguments)
+            if action.tool == "write_file":
+                result = self.write_file(arguments["path"], arguments["content"])
+            elif action.tool == "edit_file":
+                result = self.edit_file(
+                    arguments["path"], arguments["old"], arguments["new"]
+                )
+            else:
+                result = self.run_command(arguments["argv"])
+            artifacts = ()
+            if action.tool in {"write_file", "edit_file"}:
+                artifacts = (
+                    self.resolve_path(arguments["path"])
+                    .relative_to(self.policy.root)
+                    .as_posix(),
+                )
+            exit_state = "ok"
+            if action.tool == "run_command" and not result.startswith("status: 0\n"):
+                exit_state = "error"
+            self.receipt_store.put(
+                EffectReceipt(
+                    tool_call_id, action.tool, arguments, exit_state, result, artifacts
+                )
+            )
+            return result
         except (AgentError, KeyError, TypeError) as error:
             return f"error: {error}"
