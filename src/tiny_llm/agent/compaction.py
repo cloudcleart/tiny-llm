@@ -2,10 +2,12 @@
 
 """Week 4, Day 5: compact old effect observations without losing evidence."""
 
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from .generation import Message
+from .protocol import AgentError, ToolAction, parse_action
 from .receipts import EffectReceipt
 
 
@@ -23,7 +25,7 @@ class CompactionResult:
     def saved_tokens(self) -> int:
         """Return the exact token reduction reported by the supplied counter."""
 
-        pass
+        return self.tokens_before - self.tokens_after
 
 
 def compact_completed_interactions(
@@ -36,4 +38,75 @@ def compact_completed_interactions(
 ) -> CompactionResult:
     """Compact old completed effects when their exact receipt matches."""
 
-    pass
+    if type(keep_recent) is not int or keep_recent < 0:
+        raise ValueError("keep_recent must be a non-negative integer")
+    if type(result_preview_chars) is not int or result_preview_chars <= 0:
+        raise ValueError("result_preview_chars must be a positive integer")
+
+    def measure(transcript: list[Message]) -> int:
+        tokens = count_tokens([dict(message) for message in transcript])
+        if type(tokens) is not int or tokens < 0:
+            raise ValueError("count_tokens must return a non-negative integer")
+        return tokens
+
+    view = [dict(message) for message in messages]
+    tokens_before = measure(view)
+    tokens_after = tokens_before
+    eligible: list[tuple[int, EffectReceipt]] = []
+    for index in range(len(view) - 1):
+        action_message, observation = view[index : index + 2]
+        if (
+            action_message["role"] != "assistant"
+            or observation["role"] != "user"
+            or not observation["content"].startswith("Tool result:\n")
+        ):
+            continue
+        try:
+            action = parse_action(action_message["content"])
+        except AgentError:
+            continue
+        if not isinstance(action, ToolAction):
+            continue
+        result = observation["content"].removeprefix("Tool result:\n")
+        for receipt in receipts:
+            if (
+                receipt.tool == action.tool
+                and receipt.arguments == action.arguments
+                and receipt.result == result
+            ):
+                eligible.append((index + 1, receipt))
+                break
+
+    receipt_ids: list[str] = []
+    older = eligible[:-keep_recent] if keep_recent else eligible
+    for index, receipt in older:
+        preview = receipt.result[:result_preview_chars]
+        omitted = len(receipt.result) - len(preview)
+        if omitted:
+            preview += f"\n... ({omitted} chars omitted)"
+        record = {
+            "tool": receipt.tool,
+            "arguments": receipt.arguments,
+            "exit_state": receipt.exit_state,
+            "changed_artifacts": list(receipt.changed_artifacts),
+            "result_preview": preview,
+            "receipt_id": receipt.receipt_id,
+        }
+        candidate = [dict(message) for message in view]
+        candidate[index]["content"] = (
+            "Completed tool interaction (compacted evidence):\n"
+            + json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        )
+        candidate_tokens = measure(candidate)
+        if candidate_tokens < tokens_after:
+            view = candidate
+            tokens_after = candidate_tokens
+            receipt_ids.append(receipt.receipt_id)
+
+    return CompactionResult(
+        messages=tuple(view),
+        compacted_interactions=len(receipt_ids),
+        tokens_before=tokens_before,
+        tokens_after=tokens_after,
+        receipt_ids=tuple(receipt_ids),
+    )
