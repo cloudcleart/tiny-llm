@@ -4,38 +4,100 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import asdict, dataclass
 
 from .generation import Message
+from .protocol import AgentError
 
 
 @dataclass(frozen=True)
 class ModelCheckpoint:
     """Small fake-model snapshot needed for deterministic course resumption."""
 
+    # Number of semantic messages in the conversation at the saved boundary.
     conversation_position: int
+    # Zero-based index of the next response to emit from the scripted model.
     response_index: int
+    # Token IDs representing the prompt prefix stored in the fake model cache.
     cached_token_ids: tuple[int, ...]
+    # Cached token count for each layer; every entry must equal len(cached_token_ids).
     layer_offsets: tuple[int, ...]
 
     def __post_init__(self) -> None:
-        # TODO: validate positions, token ids, and aligned layer offsets.
-        pass
+        if any(
+            type(position) is not int or position < 0
+            for position in (self.conversation_position, self.response_index)
+        ):
+            raise AgentError("model checkpoint positions must be non-negative integers")
+        if not isinstance(self.cached_token_ids, tuple) or any(
+            type(token_id) is not int or token_id < 0
+            for token_id in self.cached_token_ids
+        ):
+            raise AgentError("model checkpoint token ids must be non-negative integers")
+        if (
+            not isinstance(self.layer_offsets, tuple)
+            or not self.layer_offsets
+            or any(
+                type(offset) is not int or offset != len(self.cached_token_ids)
+                for offset in self.layer_offsets
+            )
+        ):
+            raise AgentError(
+                "model checkpoint layer offsets must match the cached prefix"
+            )
 
 
 @dataclass(frozen=True)
 class AgentCheckpoint:
     """Conversation and model state saved after one complete tool observation."""
 
+    # SHA-256 digest binding the task, conversation, and model state.
     checkpoint_id: str
+    # Original task to continue after restoring the checkpoint.
     task: str
+    # Immutable conversation snapshot containing (role, content) pairs.
     messages: tuple[tuple[str, str], ...]
+    # Model snapshot corresponding to this exact conversation boundary.
     model: ModelCheckpoint
 
     def validate(self) -> None:
         """Reject a checkpoint whose identity or conversation position changed."""
 
-        pass
+        if not isinstance(self.task, str) or not self.task.strip():
+            raise AgentError("checkpoint task must be a non-empty string")
+        if not isinstance(self.messages, tuple) or not self.messages:
+            raise AgentError("checkpoint messages must be a non-empty tuple")
+        for message in self.messages:
+            if (
+                not isinstance(message, tuple)
+                or len(message) != 2
+                or not isinstance(message[0], str)
+                or message[0] not in ("system", "user", "assistant")
+                or not isinstance(message[1], str)
+            ):
+                raise AgentError(
+                    "checkpoint messages must contain valid role/content pairs"
+                )
+        if not isinstance(self.model, ModelCheckpoint):
+            raise AgentError("checkpoint model must be a ModelCheckpoint")
+        if self.model.conversation_position != len(self.messages):
+            raise AgentError("checkpoint conversation position must match its messages")
+        if self.checkpoint_id != _checkpoint_id(self.task, self.messages, self.model):
+            raise AgentError("checkpoint identity does not match its content")
+
+
+def _checkpoint_id(
+    task: str, messages: tuple[tuple[str, str], ...], model: ModelCheckpoint
+) -> str:
+    """Hash a deterministic JSON representation of all resumable state."""
+
+    payload = {"task": task, "messages": messages, "model": asdict(model)}
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def create_checkpoint(
@@ -43,4 +105,17 @@ def create_checkpoint(
 ) -> AgentCheckpoint:
     """Freeze one conversation boundary and bind it to the fake-model state."""
 
-    pass
+    if not isinstance(model, ModelCheckpoint):
+        raise AgentError("checkpoint model must be a ModelCheckpoint")
+    try:
+        frozen_messages = tuple(
+            (message["role"], message["content"]) for message in messages
+        )
+        checkpoint_id = _checkpoint_id(task, frozen_messages, model)
+    except (KeyError, TypeError, ValueError) as error:
+        raise AgentError(
+            "checkpoint task and messages must be structurally valid"
+        ) from error
+    checkpoint = AgentCheckpoint(checkpoint_id, task, frozen_messages, model)
+    checkpoint.validate()
+    return checkpoint

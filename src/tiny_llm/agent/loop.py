@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .checkpoint import AgentCheckpoint
+from .checkpoint import AgentCheckpoint, ModelCheckpoint, create_checkpoint
 from .generation import Generate, Message, initial_messages
 from .protocol import (
     AgentAction,
@@ -101,6 +101,18 @@ def run_agent(
     if task is None or not task.strip():
         raise ValueError("task must not be empty")
     messages = initial_messages(task, build_system_prompt(workspace))
+    return _run_loop(messages, generate, workspace, limits, on_event)
+
+
+def _run_loop(
+    messages: list[Message],
+    generate: Generate,
+    workspace: Any,
+    limits: AgentLimits | None = None,
+    on_event: Callable[[AgentEvent], None] | None = None,
+) -> AgentRun:
+    """Continue from a supplied conversation using the normal loop safeguards."""
+
     limits = limits or AgentLimits()
     events: list[AgentEvent] = []
     invalid_actions = 0
@@ -172,7 +184,66 @@ def run_to_checkpoint(
 ) -> AgentCheckpoint:
     """Run until a tool observation is complete, then save model and messages."""
 
-    pass
+    if type(after_tool_calls) is not int or after_tool_calls <= 0:
+        raise ValueError("after_tool_calls must be a positive integer")
+    if task is None or not task.strip():
+        raise ValueError("task must not be empty")
+    save_checkpoint = getattr(generate, "save_checkpoint", None)
+    if not callable(save_checkpoint):
+        raise AgentError("generator does not support checkpoints")
+
+    messages = initial_messages(task, build_system_prompt(workspace))
+    limits = limits or AgentLimits()
+    invalid_actions = 0
+    previous_signature: str | None = None
+    identical_actions = 0
+    # Count only executed tool calls whose observations have been appended.
+    completed_tool_calls = 0
+
+    for _step in range(1, limits.max_steps + 1):
+        if (
+            sum(len(message["content"]) for message in messages)
+            > limits.max_context_chars
+        ):
+            raise AgentError("run ended before checkpoint: context_limit")
+        response = generate(messages)
+        try:
+            action = parse_action(response, workspace.available_tools)
+        except AgentError as error:
+            invalid_actions += 1
+            previous_signature = None
+            identical_actions = 0
+            if invalid_actions >= limits.max_invalid_actions:
+                raise AgentError(
+                    "run ended before checkpoint: invalid_action_limit"
+                ) from error
+            messages = _append_tool_result(messages, response, f"error: {error}")
+            continue
+
+        if isinstance(action, FinalAction):
+            raise AgentError("run ended before checkpoint: completed")
+
+        signature = json.dumps(
+            {"tool": action.tool, "arguments": action.arguments}, sort_keys=True
+        )
+        if signature == previous_signature:
+            identical_actions += 1
+        else:
+            previous_signature = signature
+            identical_actions = 1
+        if identical_actions > limits.max_identical_actions:
+            raise AgentError("run ended before checkpoint: repeated_action_limit")
+
+        result = workspace.execute(action)
+        messages = _append_tool_result(messages, response, result)
+        completed_tool_calls += 1
+        if completed_tool_calls == after_tool_calls:
+            model_state = save_checkpoint(messages)
+            if not isinstance(model_state, ModelCheckpoint):
+                raise AgentError("save_checkpoint must return a ModelCheckpoint")
+            return create_checkpoint(task, messages, model_state)
+
+    raise AgentError("run ended before checkpoint: step_limit")
 
 
 def resume_agent(
@@ -183,4 +254,17 @@ def resume_agent(
 ) -> AgentRun:
     """Restore a fresh model and continue after the saved tool observation."""
 
-    pass
+    if not isinstance(checkpoint, AgentCheckpoint):
+        raise AgentError("checkpoint must be an AgentCheckpoint")
+    # Validate the saved conversation before changing the fresh model's state.
+    checkpoint.validate()
+    restore_checkpoint = getattr(generate, "restore_checkpoint", None)
+    if not callable(restore_checkpoint):
+        raise AgentError("generator does not support checkpoint restore")
+    restore_checkpoint(checkpoint.model)
+
+    # Rebuild mutable messages without changing the immutable saved snapshot.
+    messages = [
+        {"role": role, "content": content} for role, content in checkpoint.messages
+    ]
+    return _run_loop(messages, generate, workspace, limits)
