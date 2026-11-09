@@ -47,7 +47,7 @@ def parse_action(
     try:
         raw = json.loads(response)
     except json.JSONDecodeError as error:
-        raise AgentError(f"invalid JSON: {error.msg}") from error
+        raise AgentError(f"response is not valid JSON: {error.msg}") from error
     if not isinstance(raw, dict):
         raise AgentError("action must be a JSON object")
     if "final" in raw:
@@ -67,9 +67,9 @@ def parse_action(
     missing = required - supplied
     extra = supplied - required - optional
     if missing:
-        raise AgentError(f"missing fields: {', '.join(sorted(missing))}")
+        raise AgentError(f"missing fields for {tool}: {', '.join(sorted(missing))}")
     if extra:
-        raise AgentError(f"unexpected fields: {', '.join(sorted(extra))}")
+        raise AgentError(f"unexpected fields for {tool}: {', '.join(sorted(extra))}")
     arguments = {name: value for name, value in raw.items() if name != "tool"}
     for name, value in arguments.items():
         if name == "argv":

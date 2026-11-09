@@ -2,12 +2,14 @@
 
 """Week 4, Day 6: inspect and steer one paused checkpoint."""
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
 from .checkpoint import AgentCheckpoint
-from .generation import Generate
-from .loop import AgentLimits, AgentRun
+from .generation import Generate, Message
+from .loop import AgentLimits, AgentRun, _run_loop
+from .protocol import AgentError, ToolAction, parse_action
 
 
 @dataclass(frozen=True)
@@ -25,7 +27,35 @@ def inspect_checkpoint(
 ) -> AgentStatus:
     """Derive a bounded public status from a complete tool observation."""
 
-    pass
+    if type(evidence_chars) is not int or evidence_chars <= 0:
+        raise ValueError("evidence_chars must be a positive integer")
+    if not isinstance(checkpoint, AgentCheckpoint):
+        raise AgentError("checkpoint must be an AgentCheckpoint")
+    checkpoint.validate()
+    prefix = "Tool result:\n"
+    if (
+        len(checkpoint.messages) < 2
+        or checkpoint.messages[-2][0] != "assistant"
+        or checkpoint.messages[-1][0] != "user"
+        or not checkpoint.messages[-1][1].startswith(prefix)
+    ):
+        raise AgentError("checkpoint must end with a complete tool observation")
+    action = parse_action(checkpoint.messages[-2][1])
+    if not isinstance(action, ToolAction):
+        raise AgentError("expected a tool action at the checkpoint boundary")
+    evidence = checkpoint.messages[-1][1][len(prefix):]
+    if len(evidence) > evidence_chars:
+        evidence = evidence[: evidence_chars - 1] + "…"
+    return AgentStatus(
+        task=checkpoint.task,
+        last_action=json.dumps(
+            {"tool": action.tool, **action.arguments},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        last_evidence=evidence,
+        next_step=f"resume the model after the completed {action.tool} observation",
+    )
 
 
 def resume_with_steering(
@@ -37,4 +67,17 @@ def resume_with_steering(
 ) -> AgentRun:
     """Append one visible operator message and resume from the saved prefix."""
 
-    pass
+    if not isinstance(steering, str) or not steering.strip():
+        raise ValueError("steering must be a non-empty string")
+    # Validate the complete observation before changing the fresh model's state.
+    inspect_checkpoint(checkpoint)
+    restore_checkpoint = getattr(generate, "restore_checkpoint", None)
+    if not callable(restore_checkpoint):
+        raise AgentError("generator does not support checkpoint restore")
+    restore_checkpoint(checkpoint.model)
+
+    messages: list[Message] = [
+        {"role": role, "content": content} for role, content in checkpoint.messages
+    ]
+    messages.append({"role": "user", "content": f"Operator steering:\n{steering}"})
+    return _run_loop(messages, generate, workspace, limits)
