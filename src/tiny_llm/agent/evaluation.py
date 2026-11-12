@@ -5,10 +5,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 from .loop import AgentRun
+from .protocol import AgentError, ToolAction
 from .receipts import ReceiptStore
 from .workspace import Workspace
+
+
+def _required_string(value: str, name: str) -> None:
+    # Reject blank requirements without stripping meaningful matching whitespace.
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-blank string")
+
+
+def _relative_path(value: str, name: str) -> str:
+    _required_string(value, name)
+    path = PurePosixPath(value)
+    # Reject NUL, absolute paths, parent traversal, and the workspace root itself.
+    if "\0" in value or path.is_absolute() or ".." in path.parts or not path.parts:
+        raise ValueError(f"{name} must be a relative file path without traversal")
+    # Normalize aliases such as "a//b" before checking for duplicate file paths.
+    return path.as_posix()
 
 
 @dataclass(frozen=True)
@@ -19,7 +37,10 @@ class FileExpectation:
     content: str
 
     def __post_init__(self) -> None:
-        pass
+        object.__setattr__(self, "path", _relative_path(self.path, "file path"))
+        # Empty content is valid: an empty file can be the expected outcome.
+        if not isinstance(self.content, str):
+            raise ValueError("file content must be a string")
 
 
 @dataclass(frozen=True)
@@ -30,7 +51,9 @@ class ResultExpectation:
     contains: str
 
     def __post_init__(self) -> None:
-        pass
+        # Both the tool identity and the required result evidence must be explicit.
+        _required_string(self.tool, "result tool")
+        _required_string(self.contains, "result substring")
 
 
 @dataclass(frozen=True)
@@ -44,7 +67,20 @@ class ReceiptExpectation:
     changed_artifacts: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        pass
+        # Identify one named effect and require meaningful result evidence.
+        _required_string(self.tool_call_id, "receipt call id")
+        _required_string(self.tool, "receipt tool")
+        _required_string(self.result_contains, "receipt result substring")
+        # Only the two receipt protocol exit states are valid expectations.
+        if self.exit_state not in ("ok", "error"):
+            raise ValueError("receipt exit_state must be ok or error")
+        # Preserve artifact order and immutability for exact tuple comparison.
+        if not isinstance(self.changed_artifacts, tuple):
+            raise ValueError("receipt changed_artifacts must be a tuple")
+        # Receipt artifact names must already use canonical relative paths.
+        for artifact in self.changed_artifacts:
+            if _relative_path(artifact, "receipt artifact path") != artifact:
+                raise ValueError("receipt artifact paths must be normalized")
 
 
 @dataclass(frozen=True)
@@ -57,7 +93,25 @@ class EvaluationCase:
     receipts: tuple[ReceiptExpectation, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        pass
+        # A blank substring would trivially match every final answer.
+        _required_string(self.final_contains, "final substring")
+        # Validate collection types and members before inspecting their fields.
+        for name, expected in (
+            ("files", FileExpectation),
+            ("results", ResultExpectation),
+            ("receipts", ReceiptExpectation),
+        ):
+            values = getattr(self, name)
+            if not isinstance(values, tuple) or any(
+                not isinstance(value, expected) for value in values
+            ):
+                raise ValueError(f"{name} must be a tuple of {expected.__name__}")
+        # Each normalized file path must identify exactly one expected file fact.
+        if len({item.path for item in self.files}) != len(self.files):
+            raise ValueError("file paths must be unique")
+        # Avoid conflicting expectations for the same named effect.
+        if len({item.tool_call_id for item in self.receipts}) != len(self.receipts):
+            raise ValueError("receipt call ids must be unique")
 
 
 @dataclass(frozen=True)
@@ -77,10 +131,16 @@ class EvaluationReport:
 
     @property
     def passed(self) -> bool:
-        pass
+        # Task 6: every declared observable fact must pass independently.
+        return all(check.passed for check in self.checks)
 
     def render(self) -> str:
-        pass
+        # Preserve evaluation order so repeated renders produce the same summary.
+        lines = [f"evaluation: {'PASS' if self.passed else 'FAIL'}"]
+        for check in self.checks:
+            status = "PASS" if check.passed else "FAIL"
+            lines.append(f"- {check.name}: {status} ({check.detail})")
+        return "\n".join(lines)
 
 
 def evaluate_run(
@@ -91,4 +151,103 @@ def evaluate_run(
 ) -> EvaluationReport:
     """Judge one run only from the observable facts declared by ``case``."""
 
-    pass
+    # Reject invalid inputs; these are specification errors, not failed evidence.
+    if not isinstance(case, EvaluationCase):
+        raise ValueError("case must be an EvaluationCase")
+    if not isinstance(run, AgentRun):
+        raise ValueError("run must be an AgentRun")
+
+    # Task 2: require completion and a literal substring in the public final answer.
+    # Matching text in an incomplete run or internal event is insufficient.
+    final_passed = (
+        run.completed
+        and isinstance(run.final, str)
+        and case.final_contains in run.final
+    )
+    checks = [
+        EvaluationCheck(
+            "final",
+            final_passed,
+            "required final observed"
+            if final_passed
+            else "required final not observed",
+        )
+    ]
+    # Task 3: check final file contents in the case's declaration order.
+    for expected in case.files:
+        try:
+            # Apply the workspace's path restrictions, including symlink checks.
+            path = workspace.resolve_path(expected.path)
+            # Directories and other non-regular objects cannot provide file evidence.
+            if not path.is_file():
+                raise AgentError("path must be a regular file")
+            # Decode bytes directly to preserve CRLF and reject invalid UTF-8.
+            # workspace.read_file would also update the agent's observations.
+            content = path.read_bytes().decode("utf-8")
+            # Compare the entire content without trimming or normalizing newlines.
+            passed = content == expected.content
+            detail = "content matches" if passed else "content mismatch"
+        except (AgentError, OSError, UnicodeError) as error:
+            # Unavailable evidence fails this check without aborting later checks.
+            passed = False
+            detail = f"file evidence unavailable: {error}"
+        checks.append(EvaluationCheck(f"file:{expected.path}", passed, detail))
+
+    # Task 4: accept any matching event, regardless of event count or order.
+    for expected in case.results:
+        # Tool identity and result text must match within the same tool event.
+        # Final actions, parse failures, and absent results are not tool evidence.
+        passed = any(
+            isinstance(event.action, ToolAction)
+            and event.action.tool == expected.tool
+            and isinstance(event.result, str)
+            and expected.contains in event.result
+            for event in run.events
+        )
+        checks.append(
+            EvaluationCheck(
+                f"result:{expected.tool}",
+                passed,
+                "required result observed"
+                if passed
+                else "required result not observed",
+            )
+        )
+
+    # Task 5: use the supplied public store, never private workspace receipt state.
+    receipt_source = receipts
+    receipt_error = None
+    if case.receipts and receipts.path is not None:
+        try:
+            # Reload durable evidence so a stale in-memory cache cannot hide
+            # deleted or tampered records. This does not mutate the given store.
+            receipt_source = ReceiptStore(receipts.path)
+        except (AgentError, OSError, ValueError) as error:
+            # A corrupt log makes all requested durable receipt evidence unavailable.
+            receipt_error = f"receipt evidence unavailable: {error}"
+
+    for expected in case.receipts:
+        passed = False
+        if receipt_error is not None:
+            detail = receipt_error
+        else:
+            try:
+                # Look up the declared call ID; never replay an effect to obtain it.
+                receipt = receipt_source.get(expected.tool_call_id)
+                # Require every declared fact, including artifact order and count.
+                passed = (
+                    receipt is not None
+                    and receipt.tool == expected.tool
+                    and receipt.exit_state == expected.exit_state
+                    and expected.result_contains in receipt.result
+                    and receipt.changed_artifacts == expected.changed_artifacts
+                )
+                detail = "receipt facts match" if passed else "receipt facts mismatch"
+            except (AgentError, OSError, ValueError) as error:
+                # Isolate lookup failures so other named receipts are still checked.
+                detail = f"receipt lookup failed: {error}"
+        checks.append(
+            EvaluationCheck(f"receipt:{expected.tool_call_id}", passed, detail)
+        )
+
+    return EvaluationReport(tuple(checks))

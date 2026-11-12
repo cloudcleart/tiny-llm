@@ -287,9 +287,19 @@ def test_task_5_tampered_receipt_log_becomes_failed_checks(tmp_path, tamper):
     run, workspace, receipts, case, _approvals = _completed_case(tmp_path)
     assert receipts.path is not None
     if tamper == "digest":
-        original = receipts.path.read_text(encoding="utf-8")
+        records = [
+            json.loads(line)
+            for line in receipts.path.read_text(encoding="utf-8").splitlines()
+        ]
+        # Change a receipt fact while preserving its original digest.
+        # Parsing JSON avoids depending on the writer's whitespace formatting.
+        receipt = next(
+            record for record in records if record["tool_call_id"] == "call-1"
+        )
+        assert receipt["tool"] == "edit_file"
+        receipt["tool"] = "write_file"
         receipts.path.write_text(
-            original.replace('"tool": "edit_file"', '"tool": "write_file"', 1),
+            "".join(json.dumps(record) + "\n" for record in records),
             encoding="utf-8",
         )
     else:
