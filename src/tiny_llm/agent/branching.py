@@ -8,17 +8,20 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ..kv_cache import TinyKvFullCache
 from .checkpoint import AgentCheckpoint, ModelCheckpoint
-from .evaluation import EvaluationCase, EvaluationReport
+from .evaluation import EvaluationCase, EvaluationReport, evaluate_run
 from .generation import Generate, Message
 from .loop import AgentLimits, AgentRun
+from .protocol import AgentError
 from .receipts import ReceiptStore
+from .steering import resume_with_steering
 from .workspace import Workspace
 
 
 @dataclass(frozen=True)
 class PrefixReuse:
-    """Observable token and cache positions reused by one continuation."""
+    """Logical prefix reuse, not a wall-clock speedup measurement."""
 
     reused_tokens: int
     layer_offsets: tuple[int, ...]
@@ -46,33 +49,166 @@ class KvPrefixGenerator:
         max_tokens: int,
         enable_thinking: bool = False,
     ) -> None:
-        pass
+        if type(max_tokens) is not int or max_tokens <= 0:
+            raise ValueError("max_tokens must be a positive integer")
+        if type(enable_thinking) is not bool:
+            raise ValueError("enable_thinking must be a boolean")
+        layers = getattr(model, "num_hidden_layers", None)
+        if type(layers) is not int or layers <= 0:
+            raise ValueError("model must expose a positive num_hidden_layers")
+        self._model = model
+        self._tokenizer = tokenizer
+        self._max_tokens = max_tokens
+        self._enable_thinking = enable_thinking
+        self._layer_count = layers
+        self._response_index = 0
+        self._checkpoint: ModelCheckpoint | None = None
+        self._prefix_tokens: tuple[int, ...] = ()
+        self._prefix_key_values: tuple[tuple[Any, Any], ...] = ()
+        self._restored = False
+        self._reuse = PrefixReuse(0, (), 0)
 
     @property
     def reuse(self) -> PrefixReuse:
         """Return the prefix positions used by the latest continuation."""
 
-        pass
+        return self._reuse
 
     def save_checkpoint(self, messages: list[Message]) -> ModelCheckpoint:
         """Render and prefill one checkpoint prefix exactly once."""
 
-        pass
+        import mlx.core as mx
+
+        if self._checkpoint is not None:
+            raise AgentError("prefix checkpoint was already saved")
+        prompt = self._render(messages, add_generation_prompt=False)
+        token_ids = self._encode(prompt)
+        if not token_ids:
+            raise AgentError("checkpoint prompt must contain at least one token")
+        caches = [TinyKvFullCache() for _ in range(self._layer_count)]
+        tokens = mx.array(token_ids)
+        self._model(tokens[None], 0, caches, logits_to_keep=1)
+        for cache in caches:
+            cache.materialize()
+        if any(cache.key_values is None for cache in caches):
+            raise AgentError("model did not populate every dense cache layer")
+        self._prefix_tokens = token_ids
+        self._prefix_key_values = tuple(cache.key_values for cache in caches)
+        offsets = tuple(cache.offset for cache in caches)
+        checkpoint = ModelCheckpoint(
+            len(messages), self._response_index, token_ids, offsets
+        )
+        self._checkpoint = checkpoint
+        self._reuse = PrefixReuse(len(token_ids), offsets, len(token_ids))
+        return checkpoint
 
     def restore_checkpoint(self, checkpoint: ModelCheckpoint) -> None:
         """Bind a fresh continuation to this generator's frozen prefix."""
 
-        pass
+        if not isinstance(checkpoint, ModelCheckpoint):
+            raise AgentError("model checkpoint is invalid")
+        if self._checkpoint is None or checkpoint != self._checkpoint:
+            raise AgentError("model checkpoint does not match the saved KV prefix")
+        self._response_index = checkpoint.response_index
+        self._restored = True
 
     def fork(self) -> KvPrefixGenerator:
         """Create a fresh generator that shares only immutable prefix arrays."""
 
-        pass
+        if self._checkpoint is None:
+            raise AgentError("save a prefix checkpoint before forking")
+        branch = KvPrefixGenerator(
+            self._model,
+            self._tokenizer,
+            self._max_tokens,
+            self._enable_thinking,
+        )
+        branch._checkpoint = self._checkpoint
+        branch._prefix_tokens = self._prefix_tokens
+        branch._prefix_key_values = self._prefix_key_values
+        branch._response_index = self._checkpoint.response_index
+        branch._reuse = self._reuse
+        return branch
 
     def __call__(self, messages: list[Message]) -> str:
-        """Generate one continuation from the restored prefix."""
+        import mlx.core as mx
 
-        pass
+        if not self._restored or self._checkpoint is None:
+            raise AgentError("restore the checkpoint before generating")
+        prompt = self._render(messages, add_generation_prompt=True)
+        token_ids = self._encode(prompt)
+        prefix_size = len(self._prefix_tokens)
+        if token_ids[:prefix_size] != self._prefix_tokens:
+            raise AgentError("steered prompt does not extend the saved token prefix")
+        suffix = token_ids[prefix_size:]
+        if not suffix:
+            raise AgentError("steered prompt must add tokens after the saved prefix")
+
+        caches = self._fork_caches()
+        # Capture the reused positions before the suffix grows these handles.
+        reused_offsets = tuple(cache.offset for cache in caches)
+        tokens = mx.array(suffix)
+        offset = prefix_size
+        logits = self._model(tokens[None], offset, caches, logits_to_keep=1)[:, -1, :]
+        offset += len(suffix)
+        output: list[int] = []
+        for step in range(self._max_tokens):
+            token = int(mx.argmax(logits, axis=-1).item())
+            if token == self._tokenizer.eos_token_id:
+                break
+            output.append(token)
+            if step + 1 == self._max_tokens:
+                break
+            tokens = mx.array([token])
+            logits = self._model(tokens[None], offset, caches, logits_to_keep=1)[
+                :, -1, :
+            ]
+            offset += 1
+        self._response_index += 1
+        self._reuse = PrefixReuse(
+            reused_tokens=prefix_size,
+            layer_offsets=reused_offsets,
+            avoided_prefill_tokens=prefix_size,
+        )
+        return self._tokenizer.decode(output)
+
+    def _render(self, messages: list[Message], *, add_generation_prompt: bool) -> str:
+        try:
+            prompt = self._tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+                enable_thinking=self._enable_thinking,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise AgentError("could not render checkpoint messages") from error
+        if not isinstance(prompt, str):
+            raise AgentError("chat template must render text")
+        return prompt
+
+    def _encode(self, prompt: str) -> tuple[int, ...]:
+        try:
+            encoded = self._tokenizer.encode(prompt, add_special_tokens=False)
+            tokens = tuple(int(token) for token in encoded)
+        except (TypeError, ValueError) as error:
+            raise AgentError("tokenizer returned invalid token ids") from error
+        if any(token < 0 for token in tokens):
+            raise AgentError("tokenizer returned invalid token ids")
+        return tokens
+
+    def _fork_caches(self) -> list[TinyKvFullCache]:
+        caches: list[TinyKvFullCache] = []
+        assert self._checkpoint is not None
+        for key_values, offset in zip(
+            self._prefix_key_values,
+            self._checkpoint.layer_offsets,
+            strict=True,
+        ):
+            cache = TinyKvFullCache()
+            cache.key_values = key_values
+            cache.offset = offset
+            caches.append(cache)
+        return caches
 
 
 def run_branch(
@@ -87,7 +223,14 @@ def run_branch(
 ) -> BranchOutcome:
     """Resume, evaluate, and retain the reuse facts for one isolated branch."""
 
-    pass
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("branch name must not be blank")
+    run = resume_with_steering(checkpoint, steering, generate, workspace, limits)
+    report = evaluate_run(run, workspace, receipts, case)
+    reuse = getattr(generate, "reuse", None)
+    if not isinstance(reuse, PrefixReuse):
+        raise AgentError("branch generator did not report prefix reuse")
+    return BranchOutcome(name, steering, run, report, reuse)
 
 
 def select_branch(
@@ -95,4 +238,12 @@ def select_branch(
 ) -> BranchOutcome:
     """Return one explicitly named passing branch."""
 
-    pass
+    if not isinstance(selected_name, str) or not selected_name.strip():
+        raise ValueError("selected branch name must not be blank")
+    matches = [outcome for outcome in outcomes if outcome.name == selected_name]
+    if len(matches) != 1:
+        raise AgentError("selected name must identify exactly one branch")
+    selected = matches[0]
+    if not selected.report.passed:
+        raise AgentError("selected branch must pass its evaluation report")
+    return selected

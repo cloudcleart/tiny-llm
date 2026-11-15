@@ -26,8 +26,12 @@ class ApprovalDecision:
     reason: str = ""
 
     def __post_init__(self) -> None:
-        # TODO: validate the decision and require a reason for denials.
-        pass
+        if not isinstance(self.approved, bool):
+            raise ValueError("approved must be a boolean")
+        if not isinstance(self.reason, str):
+            raise ValueError("operator reason must be a string")
+        if not self.approved and not self.reason.strip():
+            raise ValueError("denial requires a nonblank operator reason")
 
 
 @dataclass(frozen=True)
@@ -273,14 +277,17 @@ class Workspace:
         return path, self._write_bytes(content.replace(old, new, 1))
 
     def _approve(self, action: ToolAction) -> None:
-        """Request approval once; only the boolean True permits an effect."""
+        """Request approval once and expose a structured denial to the model."""
 
         if self.confirm_tool is None:
-            raise AgentError("operator denied")
+            raise AgentError("operator denied the tool action")
 
-        approved = self.confirm_tool(action)
-        if approved is not True:
-            raise AgentError("operator denied")
+        decision = self.confirm_tool(action)
+        if isinstance(decision, ApprovalDecision):
+            if not decision.approved:
+                raise AgentError(f"operator denied the tool action: {decision.reason}")
+        elif decision is not True:
+            raise AgentError("operator denied the tool action")
 
     def _replace(self, raw: str, proposed: bytes, expected: str | None) -> str:
         """Recheck the pre-approval observation and atomically replace the file."""

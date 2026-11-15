@@ -212,7 +212,93 @@ def test_task_2_cached_prefix_is_prefilled_once_and_reused_by_both_forks():
     )
 
 
-def test_task_3_steered_prompt_must_extend_the_exact_saved_token_prefix():
+@pytest.mark.parametrize("max_tokens, expected", [(1, "A"), (2, "AB"), (4, "AB")])
+def test_task_2_decodes_suffix_until_eos_or_token_budget(max_tokens, expected):
+    class ReplyModel(DenseEosModel):
+        def __call__(self, tokens, offset, caches, logits_to_keep=None):
+            super().__call__(tokens, offset, caches, logits_to_keep)
+            if tokens.shape[1] > 1:
+                next_token = ord("A")
+            elif int(tokens.item()) == ord("A"):
+                next_token = ord("B")
+            else:
+                next_token = 0
+            return mx.array([[[int(token == next_token) for token in range(128)]]])
+
+    model = ReplyModel()
+    generator = KvPrefixGenerator(model, CharacterTokenizer(), max_tokens)
+    messages = [{"role": "user", "content": "task"}]
+    checkpoint = generator.save_checkpoint(messages)
+    prefix_size = len(checkpoint.cached_token_ids)
+    continuation = [*messages, {"role": "user", "content": "continue"}]
+    suffix_size = len(
+        CharacterTokenizer().apply_chat_template(
+            continuation,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+    ) - prefix_size
+
+    for _ in range(2):
+        branch = generator.fork()
+        branch.restore_checkpoint(checkpoint)
+        first_call = len(model.calls)
+        assert branch(continuation) == expected
+        calls = model.calls[first_call:]
+        assert calls[0][:2] == (prefix_size, suffix_size)
+        assert all(
+            call[:2] == (prefix_size + suffix_size + index, 1)
+            for index, call in enumerate(calls[1:])
+        )
+
+
+def test_task_3_reuse_report_matches_actual_suffix_calls_across_turns():
+    class ObservedModel(DenseEosModel):
+        def __init__(self):
+            super().__init__()
+            self.start_offsets = []
+
+        def __call__(self, tokens, offset, caches, logits_to_keep=None):
+            self.start_offsets.append(tuple(cache.offset for cache in caches))
+            return super().__call__(tokens, offset, caches, logits_to_keep)
+
+    model = ObservedModel()
+    generator = KvPrefixGenerator(model, CharacterTokenizer(), 2)
+    messages = [{"role": "user", "content": "task"}]
+    checkpoint = generator.save_checkpoint(messages)
+    branch = generator.fork()
+    branch.restore_checkpoint(checkpoint)
+    messages.append({"role": "user", "content": "validate"})
+
+    for _ in range(2):
+        branch(messages)
+        offset, size, *_ = model.calls[-1]
+        report = branch.reuse
+        assert report.reused_tokens == offset == len(checkpoint.cached_token_ids)
+        assert report.layer_offsets == model.start_offsets[-1] == (offset, offset)
+        assert report.avoided_prefill_tokens == report.reused_tokens
+        assert size == len(
+            CharacterTokenizer().apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        ) - offset
+        messages.extend(
+            [
+                {"role": "assistant", "content": "action"},
+                {"role": "user", "content": "Tool result:\npassed"},
+            ]
+        )
+
+    assert len(model.calls) == 3
+    assert [call[0] for call in model.calls].count(0) == 1
+
+
+@pytest.mark.parametrize("changed_system", ["changed", "SYSTEM"])
+def test_task_3_steered_prompt_must_extend_the_exact_saved_token_prefix(changed_system):
     generator = KvPrefixGenerator(DenseEosModel(), CharacterTokenizer(), 2)
     messages = [
         {"role": "system", "content": "system"},
@@ -232,7 +318,7 @@ def test_task_3_steered_prompt_must_extend_the_exact_saved_token_prefix():
         branch.restore_checkpoint(foreign_checkpoint)
     branch.restore_checkpoint(checkpoint)
     changed = [
-        {"role": "system", "content": "changed"},
+        {"role": "system", "content": changed_system},
         {"role": "user", "content": "task"},
         {"role": "user", "content": "Operator steering:\ncontinue"},
     ]
@@ -365,7 +451,6 @@ def test_task_4_forks_effects_and_receipts_then_isolates_later_branch_evidence(
     assert failing.reuse.reused_tokens > 0
     assert passing.report.passed
     assert not failing.report.passed
-    assert select_branch((passing, failing), "validate-only") is passing
     assert (tmp_path / "validate-only" / "app.py").read_text() == "answer = 2\n"
     assert (tmp_path / "try-extra-edit" / "app.py").read_text() == "answer = 2\n"
     assert validate_receipts.get("call-1").tool == "edit_file"
@@ -390,6 +475,17 @@ def test_task_5_selection_requires_one_named_passing_outcome(tmp_path):
     failing = run_branch(
         "candidate", "finish", checkpoint, model, workspace, receipts, case
     )
+    passing = run_branch(
+        "validate-only",
+        "finish",
+        checkpoint,
+        ScriptedCheckpointModel(("unused", "unused", '{"final":"done"}')),
+        workspace,
+        receipts,
+        EvaluationCase(final_contains="done"),
+    )
+
+    assert select_branch((passing, failing), "validate-only") is passing
 
     with pytest.raises(AgentError, match="exactly one"):
         select_branch((failing,), "absent")
