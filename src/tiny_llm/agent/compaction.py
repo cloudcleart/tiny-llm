@@ -79,6 +79,7 @@ def compact_completed_interactions(
 
     receipt_ids: list[str] = []
     older = eligible[:-keep_recent] if keep_recent else eligible
+    candidate = [dict(message) for message in view]
     for index, receipt in older:
         preview = receipt.result[:result_preview_chars]
         omitted = len(receipt.result) - len(preview)
@@ -92,16 +93,21 @@ def compact_completed_interactions(
             "result_preview": preview,
             "receipt_id": receipt.receipt_id,
         }
-        candidate = [dict(message) for message in view]
         candidate[index]["content"] = (
             "Completed tool interaction (compacted evidence):\n"
             + json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         )
+        receipt_ids.append(receipt.receipt_id)
+
+    # Judge the completed view as a whole: evidence for a short effect may
+    # grow while a long observation more than offsets that metadata cost.
+    if receipt_ids:
         candidate_tokens = measure(candidate)
-        if candidate_tokens < tokens_after:
+        if candidate_tokens < tokens_before:
             view = candidate
             tokens_after = candidate_tokens
-            receipt_ids.append(receipt.receipt_id)
+        else:
+            receipt_ids.clear()
 
     return CompactionResult(
         messages=tuple(view),

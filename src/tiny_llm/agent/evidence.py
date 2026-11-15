@@ -4,11 +4,42 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .protocol import ToolAction
+from .protocol import AgentError, ToolAction
 from .workspace import ToolPolicy, Workspace
+
+
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+_ARTIFACT_ID = re.compile(r"artifact-[0-9a-f]{64}")
+_RANGE_PATH = re.compile(
+    r"\.tool-artifacts/(artifact-[0-9a-f]{64})/bytes/([0-9]+)-([0-9]+)"
+)
+
+
+def _json(payload: dict) -> str:
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _head_end(data: bytes, limit: int) -> int:
+    """Move a prefix end inward to a UTF-8 code point boundary."""
+    end = min(len(data), limit)
+    while end < len(data) and data[end] & 0xC0 == 0x80:
+        end -= 1
+    return end
+
+
+def _tail_start(data: bytes, limit: int) -> int:
+    start = max(0, len(data) - limit)
+    while start < len(data) and data[start] & 0xC0 == 0x80:
+        start += 1
+    return start
 
 
 @dataclass(frozen=True)
@@ -20,7 +51,16 @@ class ArtifactRef:
     sha256: str
 
     def __post_init__(self) -> None:
-        pass
+        if not isinstance(self.artifact_id, str) or not _ARTIFACT_ID.fullmatch(
+            self.artifact_id
+        ):
+            raise ValueError("invalid artifact id")
+        if type(self.byte_count) is not int or self.byte_count < 0:
+            raise ValueError("artifact byte count must be a nonnegative integer")
+        if not isinstance(self.sha256, str) or not _DIGEST.fullmatch(self.sha256):
+            raise ValueError("invalid artifact digest")
+        if self.artifact_id != f"artifact-{self.sha256}":
+            raise ValueError("artifact id and digest must match")
 
 
 @dataclass
@@ -31,22 +71,57 @@ class ArtifactStore:
     _records: dict[str, ArtifactRef] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
-        pass
+        self.root = Path(self.root).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+        if not self.root.is_dir():
+            raise ValueError("artifact root must be a directory")
 
     def put(self, result: str) -> ArtifactRef:
         """Persist one complete UTF-8 tool result and return its identity."""
 
-        pass
+        data = result.encode("utf-8")
+        digest = hashlib.sha256(data).hexdigest()
+        record = ArtifactRef(f"artifact-{digest}", len(data), digest)
+        try:
+            path = self.root / record.artifact_id
+            if path.is_symlink():
+                raise AgentError("artifact storage is not available")
+            path.write_bytes(data)
+        except OSError as error:
+            raise AgentError("artifact storage is not available") from error
+        self._records[record.artifact_id] = record
+        return record
 
     def read_range(self, artifact_id: str, start: int, end: int) -> bytes:
         """Read one exact half-open byte range from a known artifact."""
 
-        pass
+        record = self._records.get(artifact_id)
+        if record is None:
+            raise AgentError("artifact is not available in this store")
+        if type(start) is not int or type(end) is not int or not 0 <= start < end:
+            raise AgentError("artifact range requires 0 <= start < end")
+        if end > record.byte_count:
+            raise AgentError("artifact range exceeds stored byte count")
+        try:
+            path = self.root / artifact_id
+            if path.is_symlink():
+                raise AgentError("artifact is not available in this store")
+            # Bound the integrity read if the file has grown since registration.
+            with path.open("rb") as stream:
+                data = stream.read(record.byte_count + 1)
+        except OSError as error:
+            raise AgentError("artifact is not available in this store") from error
+        if (
+            len(data) != record.byte_count
+            or hashlib.sha256(data).hexdigest() != record.sha256
+        ):
+            raise AgentError("artifact digest does not match its recorded identity")
+        return data[start:end]
 
     def range_path(self, artifact_id: str, start: int, end: int) -> str:
         """Return the virtual read_file path for one explicit byte range."""
 
-        pass
+        return f".tool-artifacts/{artifact_id}/bytes/{start}-{end}"
 
 
 @dataclass
@@ -60,6 +135,12 @@ class BoundedEvidenceWorkspace:
     max_range_bytes: int = 512
 
     def __post_init__(self) -> None:
+        if type(self.max_inline_bytes) is not int or self.max_inline_bytes < 512:
+            raise ValueError("max_inline_bytes must be at least 512")
+        if type(self.preview_bytes) is not int or self.preview_bytes < 0:
+            raise ValueError("preview_bytes must be a nonnegative integer")
+        if self.preview_bytes > self.max_inline_bytes:
+            raise ValueError("preview_bytes must not exceed max_inline_bytes")
         if type(self.max_range_bytes) is not int or self.max_range_bytes < 4:
             raise ValueError("max_range_bytes must be at least 4")
 
@@ -67,21 +148,104 @@ class BoundedEvidenceWorkspace:
     def policy(self) -> ToolPolicy:
         """Expose the wrapped policy to the existing system prompt."""
 
-        pass
+        return self.workspace.policy
 
     @property
     def available_tools(self) -> frozenset[str]:
         """Reuse exactly the wrapped workspace's existing tool schema."""
 
-        pass
+        return self.workspace.available_tools
 
     @property
     def modified_files(self) -> tuple[str, ...]:
         """Expose file-tool changes from the wrapped workspace."""
 
-        pass
+        return self.workspace.modified_files
 
     def execute(self, action: ToolAction, tool_call_id: str | None = None) -> str:
         """Execute normally, externalizing only oversized model observations."""
 
-        pass
+        path = action.arguments.get("path")
+        if (
+            action.tool == "read_file"
+            and isinstance(path, str)
+            and path.startswith(".tool-artifacts/")
+        ):
+            return self._read_artifact_path(path)
+        result = self.workspace.execute(action, tool_call_id)
+        if result.startswith("error:"):
+            return result
+        data = result.encode("utf-8")
+        if len(data) <= self.max_inline_bytes:
+            return result
+        try:
+            record = self.artifacts.put(result)
+            return self._bounded_observation(record, data)
+        except AgentError as error:
+            return f"error: {error}"
+
+    def _read_artifact_path(self, path: str) -> str:
+        match = _RANGE_PATH.fullmatch(path)
+        if match is None:
+            return "error: artifact range path is malformed"
+        artifact_id, raw_start, raw_end = match.groups()
+        try:
+            start, end = int(raw_start), int(raw_end)
+        except ValueError:
+            return "error: artifact range path is malformed"
+        try:
+            if not 0 <= start < end:
+                raise AgentError("artifact range requires 0 <= start < end")
+            if end - start > self.max_range_bytes:
+                raise AgentError(f"artifact range exceeds {self.max_range_bytes} bytes")
+            data = self.artifacts.read_range(artifact_id, start, end)
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise AgentError(
+                    "artifact range does not align to UTF-8 text"
+                ) from error
+            record = self.artifacts._records[artifact_id]
+            return "Artifact range:\n" + _json(
+                {
+                    "artifact_id": artifact_id,
+                    "total_byte_count": record.byte_count,
+                    "sha256": record.sha256,
+                    "start": start,
+                    "end": end,
+                    "byte_count": len(data),
+                    "data": text,
+                }
+            )
+        except AgentError as error:
+            return f"error: {error}"
+
+    def _bounded_observation(self, record: ArtifactRef, data: bytes) -> str:
+        range_end = _head_end(data, self.max_range_bytes)
+        preview = self.preview_bytes
+        while True:
+            head_end = _head_end(data, preview)
+            tail_start = max(head_end, _tail_start(data, preview))
+            observation = "Tool result externalized:\n" + _json(
+                {
+                    "artifact_id": record.artifact_id,
+                    "byte_count": record.byte_count,
+                    "sha256": record.sha256,
+                    "head_preview": data[:head_end].decode("utf-8"),
+                    "head_range": [0, head_end],
+                    "tail_preview": data[tail_start:].decode("utf-8"),
+                    "tail_range": [tail_start, len(data)],
+                    "omitted_range": [head_end, tail_start],
+                    "range_request": {
+                        "tool": "read_file",
+                        "path": self.artifacts.range_path(
+                            record.artifact_id, 0, range_end
+                        ),
+                    },
+                }
+            )
+            if len(observation.encode("utf-8")) <= self.max_inline_bytes:
+                return observation
+            if preview == 0:
+                raise AgentError("artifact metadata exceeds inline byte limit")
+            preview -= 1
