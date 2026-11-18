@@ -1,6 +1,6 @@
 import mlx.core as mx
 import mlx.nn as nn
-import tiny_llm_ref
+import tiny_llm
 from .utils import assert_allclose
 import pytest
 
@@ -46,12 +46,12 @@ def test_mlx_attention(benchmark):
         assert_allclose(result, res, precision=mx.float32, rtol=1e-2)
 
 
-def test_refsol_attention(benchmark):
+def test_course_attention(benchmark):
     with mx.stream(mx.gpu):
         q, k, v, res = get_test_attention_data()
         result = benchmark(
             lambda: evaluate_attention(
-                lambda: tiny_llm_ref.scaled_dot_product_attention_grouped(
+                lambda: tiny_llm.scaled_dot_product_attention_grouped(
                     q, k, v, scale=1.0
                 )
             )
@@ -74,7 +74,7 @@ def test_qwen3_4b_causal_prefill(benchmark, sequence_length, implementation):
         elif implementation == "explicit":
 
             def fn():
-                return tiny_llm_ref.scaled_dot_product_attention_grouped(
+                return tiny_llm.scaled_dot_product_attention_grouped(
                     q, k, v, scale=1.0, mask="causal"
                 )
 

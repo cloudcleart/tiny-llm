@@ -122,7 +122,7 @@ def test_kernel_replay_routes_attention_with_production_guard(
 
 
 def test_student_and_reference_profiles_share_the_production_guard():
-    for name in ("tiny_llm", "tiny_llm_ref"):
+    for name in ("tiny_llm",):
         implementation = profile.load_implementation(name)
         assert implementation.decode_attention_max_query == 2
         assert implementation.decode_attention_max_context == 256

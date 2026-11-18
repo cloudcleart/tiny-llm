@@ -191,11 +191,6 @@ def load_solution_modules(solution: str):
         from tiny_llm.kv_cache import BatchingKvCache, TinyKvFullCache
 
         return "tiny_llm", models, TinyKvFullCache, BatchingKvCache
-    if solution in {"tiny_llm_ref", "ref"}:
-        from tiny_llm_ref import models
-        from tiny_llm_ref.kv_cache import BatchingKvCache, TinyKvFullCache
-
-        return "tiny_llm_ref", models, TinyKvFullCache, BatchingKvCache
     raise ValueError(f"Solution {solution} not supported for bench")
 
 

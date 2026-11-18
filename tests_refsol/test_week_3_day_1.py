@@ -8,8 +8,8 @@ import pytest
 from mlx_lm import load
 
 if Path(__file__).parent.name == "tests_refsol":
-    import tiny_llm_ref.batch as batch_runtime
-    import tiny_llm_ref.models as model_dispatch
+    import tiny_llm.batch as batch_runtime
+    import tiny_llm.models as model_dispatch
 else:
     import tiny_llm.batch as batch_runtime
     import tiny_llm.models as model_dispatch
@@ -441,7 +441,9 @@ class SchedulerFakeModel:
         else:
             cache[0].update_and_fetch(keys, keys)
 
-        next_by_token = {0: 99, 1: 99, 2: 3, 3: 99, 4: 99, 10: 1, 21: 2, 30: 4}
+        # The first chunk of "bb" must not emit a completion, even if its
+        # prediction is EOS. Only the final prompt chunk predicts token 2.
+        next_by_token = {0: 99, 1: 99, 2: 3, 3: 99, 4: 99, 10: 1, 20: 99, 21: 2, 30: 4}
         logits = mx.zeros((inputs.shape[0], 1, 100), dtype=mx.float32)
         for row, token in enumerate(inputs[:, -1].tolist()):
             logits[row, 0, next_by_token[token]] = 1
@@ -491,17 +493,28 @@ def test_task_3_qwen3_1_7b():
 
 
 @pytest.mark.parametrize("limit,expected", [(2, ""), (3, "2"), (4, "23")])
-def test_task_4_length_limit_includes_prompt(monkeypatch, limit, expected):
+@pytest.mark.parametrize("prefill_step", [1, 2], ids=["chunked", "whole-prompt"])
+def test_task_4_length_limit_includes_prompt(
+    monkeypatch, limit, expected, prefill_step
+):
     monkeypatch.setattr(batch_runtime, "_print_progress", lambda *args: None)
     model = SchedulerFakeModel()
     prompts = ["bb"]
     result = batch_runtime.batch_generate(
-        model, SchedulerFakeTokenizer(), prompts, max_seq_len=limit, prefill_step=1
+        model,
+        SchedulerFakeTokenizer(),
+        prompts,
+        max_seq_len=limit,
+        prefill_step=prefill_step,
     )
     assert result == [(0, expected)]
     assert prompts == ["bb"]
-    if limit > 2:
-        assert model.prefill_records == [(0, [0], [[20, 21]])]
+    expected_prefill = (
+        [(0, [0], [[20]]), (0, [1], [[21]])]
+        if prefill_step == 1
+        else [(0, [0], [[20, 21]])]
+    )
+    assert model.prefill_records == expected_prefill
 
 
 def test_task_4_rejects_long_prompt_before_cache_creation(monkeypatch):

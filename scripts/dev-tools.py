@@ -67,17 +67,6 @@ def test(args):
     return pytest.main(["-v", "tests"] + args.remainders)
 
 
-def test_refsol(args):
-    if not validate_week_day(args):
-        return 1
-    configure_mlx_cpu_compiler()
-    if args.week is not None:
-        return pytest.main(
-            ["-v", f"tests_refsol/test_week_{args.week}_day_{args.day}.py"]
-            + args.remainders
-        )
-    return pytest.main(["-v", "tests_refsol"] + args.remainders)
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -92,18 +81,11 @@ def main():
     test_parser.add_argument("--day", type=int, required=False)
     test_parser.add_argument("remainders", nargs="*")
     test_parser.set_defaults(test_parser=True)
-    test_refsol_parser = subparsers.add_parser("test-refsol")
-    test_refsol_parser.add_argument("--week", type=int, required=False)
-    test_refsol_parser.add_argument("--day", type=int, required=False)
-    test_refsol_parser.add_argument("remainders", nargs="*")
-    test_refsol_parser.set_defaults(test_refsol_parser=True)
     args = parser.parse_args()
     if hasattr(args, "copy_test_parser"):
         return copy_test(args, force=args.force)
     if hasattr(args, "test_parser"):
         return test(args)
-    if hasattr(args, "test_refsol_parser"):
-        return test_refsol(args)
     return 1
 
 

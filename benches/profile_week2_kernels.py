@@ -108,9 +108,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="qwen3-4b")
     parser.add_argument(
         "--solution",
-        choices=("tiny_llm", "tiny_llm_ref"),
-        default="tiny_llm_ref",
-        help="implementation to profile (default: tiny_llm_ref)",
+        choices=("tiny_llm",),
+        default="tiny_llm",
+        help="implementation to profile (default: tiny_llm)",
     )
     parser.add_argument(
         "--case",

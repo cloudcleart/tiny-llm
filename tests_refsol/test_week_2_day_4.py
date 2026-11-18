@@ -6,9 +6,9 @@ import importlib
 import mlx.core as mx
 import pytest
 
-from tiny_llm_ref.basics import silu
-from tiny_llm_ref.layer_norm import RMSNorm
-from tiny_llm_ref.positional_encoding import RoPE
+from tiny_llm.basics import silu
+from tiny_llm.layer_norm import RMSNorm
+from tiny_llm.positional_encoding import RoPE
 from .tiny_llm_base import FastRMSNorm, FastRoPE, Qwen3ModelWeek2, swiglu
 from .utils import assert_allclose, tiny_qwen3_mlx_model
 

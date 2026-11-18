@@ -66,12 +66,13 @@ existing checkout with:
 ```bash
 pdm install -v
 pdm run check-installation
-pdm run test-refsol -- -- -k week_1
+pdm run test --week 1 --day 1
 ```
 
 The `tiny_llm` package is where students implement the exercises.
-`tiny_llm_ref` contains the reference solution used by the tests and benchmark
-appendix. The [book summary](book/src/SUMMARY.md) lists the chapter order;
+Reference implementations have been removed from this checkout. Tests and
+benchmarks use `tiny_llm`; `tests_refsol` retains course test templates only.
+Historical book examples using `ref` or `test-refsol` no longer apply. The [book summary](book/src/SUMMARY.md) lists the chapter order;
 implementation, test, and publication readiness is tracked below.
 
 ## Roadmap

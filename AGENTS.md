@@ -20,10 +20,10 @@ pdm install -v
 pdm run check-installation
 ```
 
-- Optional baseline check from the setup chapter (reference solution, Week 1):
+- Optional targeted check (current implementation, Week 1):
 
 ```bash
-pdm run test-refsol -- -- -k week_1
+pdm run test --week 1 --day 1
 ```
 
 ## Agent Test Workflow
@@ -55,12 +55,8 @@ pdm run test --week 2 --day 3 -- -k task_3
 pdm run test --week 2 --day 3 -- -k gpu
 ```
 
-Run reference-solution tests:
-
-```bash
-pdm run test-refsol
-pdm run test-refsol --week 2 --day 3 -- -k task_3
-```
+Reference implementations and their commands have been removed.
+`tests_refsol/` contains course test templates targeting `tiny_llm` only.
 
 ## Extension Rebuild Rule
 

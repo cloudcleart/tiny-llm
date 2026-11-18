@@ -5,7 +5,7 @@ from math import prod
 import mlx.core as mx
 import pytest
 
-from tiny_llm_ref.attention import scaled_dot_product_attention_grouped
+from tiny_llm.attention import scaled_dot_product_attention_grouped
 from .tiny_llm_base import (
     FastRMSNorm,
     FastRoPE,

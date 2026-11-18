@@ -65,11 +65,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_case(context: int, page_size: int, seed: int) -> dict:
-    from tiny_llm_ref.attention import (
+    from tiny_llm.attention import (
         paged_attention,
         scaled_dot_product_attention_grouped,
     )
-    from tiny_llm_ref.paged_kv_cache import TinyKvPagedCache, TinyKvPagedPool
+    from tiny_llm.paged_kv_cache import TinyKvPagedCache, TinyKvPagedPool
 
     mx.random.seed(seed + context)
     query = mx.random.normal((1, QUERY_HEADS, 1, HEAD_DIM)).astype(mx.bfloat16)
@@ -273,7 +273,7 @@ def main() -> None:
             "host": host,
             "configuration": {
                 "model_shape": "qwen3-4b",
-                "solution": "tiny_llm_ref",
+                "solution": "tiny_llm",
                 "operator": "paged_attention",
                 "contexts": args.contexts,
                 "page_size": args.page_size,

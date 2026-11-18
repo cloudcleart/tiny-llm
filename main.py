@@ -75,16 +75,6 @@ if args.solution == "tiny_llm":
         sampler,
     )
 
-elif args.solution == "tiny_llm_ref" or args.solution == "ref":
-    print("Using tiny_llm_ref solution")
-    from tiny_llm_ref import (
-        models,
-        simple_generate,
-        simple_generate_with_kv_cache,
-        speculative_generate,
-        sampler,
-    )
-
 elif args.solution == "mlx":
     use_mlx = True
     from mlx_lm.generate import stream_generate

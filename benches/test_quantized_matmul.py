@@ -1,6 +1,6 @@
 import mlx.core as mx
 import mlx.nn as nn
-import tiny_llm_ref
+import tiny_llm
 from .utils import assert_allclose
 
 
@@ -47,13 +47,13 @@ def test_mlx_quantized_matmul(benchmark):
         assert_allclose(result, res, precision=mx.bfloat16, rtol=1e-2)
 
 
-def test_refsol_quantized_matmul(benchmark):
+def test_course_quantized_matmul(benchmark):
     with mx.stream(mx.gpu):
         w_q, scales, biases, x, res = get_test_matmul_data()
         mx.eval(w_q, scales, biases, x, res)
         result = benchmark(
             lambda: evaluate(
-                lambda: tiny_llm_ref.quantized_matmul(
+                lambda: tiny_llm.quantized_matmul(
                     scales, biases, 128, 4, x, w_q, transpose_b=True
                 )
             )
@@ -61,13 +61,13 @@ def test_refsol_quantized_matmul(benchmark):
         assert_allclose(result, res, precision=mx.bfloat16, rtol=1e-2)
 
 
-def test_refsol_quantized_matvec_custom(benchmark):
+def test_course_quantized_matvec_custom(benchmark):
     with mx.stream(mx.gpu):
         w_q, scales, biases, x, res = get_test_matvec_data()
         mx.eval(w_q, scales, biases, x, res)
         result = benchmark(
             lambda: evaluate(
-                lambda: tiny_llm_ref.quantized_matvec_custom(
+                lambda: tiny_llm.quantized_matvec_custom(
                     scales, biases, 128, 4, x, w_q, transpose_b=True
                 )
             )

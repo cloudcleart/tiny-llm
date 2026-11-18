@@ -109,7 +109,7 @@ def test_task_2_course_owned_tiles_cover_matrix_boundaries_gpu(
 def test_task_2_course_owned_loader_zero_fills_partial_rows_gpu():
     """A full-width tile with partial rows must still use the safe path."""
     extension = (
-        "extensions_ref"
+        "extensions"
         if Path(__file__).parent.name == "tests_refsol"
         else "extensions"
     )
@@ -331,7 +331,7 @@ def test_day6_slice_precedes_vocabulary_projection(monkeypatch, tied, keep):
 @pytest.mark.parametrize("valid_rows,valid_columns", [(4, 8), (2, 8), (4, 5), (2, 5)])
 def test_day6_loader_full_and_edge_paths(transpose, vector, valid_rows, valid_columns):
     extension = (
-        "extensions_ref"
+        "extensions"
         if Path(__file__).parent.name == "tests_refsol"
         else "extensions"
     )
